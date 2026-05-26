@@ -32,11 +32,25 @@ We want to move this to GitHub Actions so that:
 ## 1. Current state (verified 2026-05-26)
 
 * **Branch policy (CLAUDE.md):** Only `@jos-eph` may push. All agent work must occur on a branch suffixed `_claude`. `main` is the only branch agents may target via PR.
-* **Script (`generate_tiles_pb.py`):** Generates `SCRIPTMADE_<YYYYMMDD_HHMMSS>_omt.pmtiles` from a hard-coded local source file `us-northeast-latest.osm.pbf` and a hard-coded bbox `-76.00,39.60,-74.60,40.40`.
+* **Script (`generate_tiles_pb.py`):** Generates `SCRIPTMADE_<YYYYMMDD_HHMMSS>_omt.pmtiles` from a source file currently referenced as `us-northeast-latest.osm.pbf` (expected at the script's working directory) and a hard-coded bbox `-76.00,39.60,-74.60,40.40`.
+* **Source PBF is NEVER committed to the repo.** It is multi-hundred-megabyte upstream OSM data and would violate both repo size hygiene and CLAUDE.md's "no large datasets in git" rule. Local runs require the operator to download the file manually before invoking the script; CI runs will fetch it dynamically (see §1.1).
 * **Dependencies invoked as subprocesses:** `osmium`, `tippecanoe`. Both must be installed on the runner.
 * **Outputs:** intermediate per-layer `.osm.pbf` + `.geojsonseq` files; final `.pmtiles`.
 * **No CI/CD yet:** the repo currently has no `.github/workflows/` directory.
 * **No releases yet.**
+
+### 1.1 Canonical upstream source
+
+All runs — local and CI — pull from a single canonical URL:
+
+```
+SOURCE_PBF_URL = https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf
+SOURCE_MD5_URL = https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf.md5
+```
+
+This URL is the single source of truth referenced throughout this plan. Any change to the upstream extract is an explicit, reviewed decision (see §10 — out of scope) and would require updating the constant in exactly two places (the script default and the workflow), not scattered string literals.
+
+`.gitignore` must include `*.osm.pbf` (and `*.pmtiles`, `*.geojsonseq`) to make accidental commits impossible.
 
 ---
 
@@ -47,8 +61,8 @@ We want to move this to GitHub Actions so that:
                           │  GitHub Actions runner (ubuntu-latest)     │
    schedule (daily)       │                                            │
    workflow_dispatch ───► │  1. Install osmium-tool, tippecanoe        │
-   (push_release=true)    │  2. Download Geofabrik us-northeast PBF    │
-                          │     (verify upstream md5)                  │
+   (push_release=true)    │  2. Download SOURCE_PBF_URL (Geofabrik     │
+                          │     us-northeast) to /tmp; verify .md5     │
                           │  3. Compute run timestamp <DATE>           │
                           │  4. Run generate_tiles_pb.py --base-name   │
                           │     philly_commute_region --date <DATE>    │
@@ -67,6 +81,7 @@ Key design choices:
   * A single, perpetual release `current` (with stable tag `current`) holds the always-overwritten `philly_commute_region_current.*` assets.
   * This gives consumers two stable patterns: pin to a date, or always pull `current`.
   * **🟡 DECISION D4:** approve this two-release pattern, or pick an alternative.
+* **Source PBF is fetched at runtime, never stored in git.** The workflow downloads `SOURCE_PBF_URL` (see §1.1) into the runner's ephemeral workspace (or `/tmp`) on every run. The repo contains no `.osm.pbf` files and `.gitignore` enforces this.
 * **No large data in git.** OSM extracts and outputs live only in `/tmp` (or runner workspace) and on Releases.
 * **Idempotent runs.** If a run is re-triggered for the same `<DATE>`, the workflow should refuse to overwrite a dated release's assets (immutability), but is always free to overwrite `current`.
 * **Free-tier respect.** Single-job, single-OS, no matrix. Concurrency group prevents overlap. Cache `apt` install if it materially saves time (see D7).
@@ -100,18 +115,23 @@ Please fill in each decision by replacing the placeholder with your choice (or n
 ### 4.1 `generate_tiles_pb.py` — refactor
 
 * Add CLI args via `argparse`:
-  * `--source-pbf PATH` (default keeps current behaviour for local runs).
+  * `--source-pbf PATH` (optional; **no default**). If provided, the script uses this local file directly and skips any download. Used by the CI workflow, which downloads the PBF in a dedicated step, and by developers who already have a local copy.
+  * `--source-url URL` (default: `SOURCE_PBF_URL` from §1.1, i.e. the Geofabrik us-northeast extract). If `--source-pbf` is not provided, the script downloads from this URL into `--output-dir` (or a temp dir) before processing. This makes local runs work out of the box without manual download.
   * `--bbox "minlon,minlat,maxlon,maxlat"` (default keeps the SEPTA bbox).
   * `--base-name STR` (default `philly_commute_region`).
   * `--date STR` (date stamp; if omitted, generated as in D3).
   * `--output-dir PATH` (default `.`).
   * `--keep-intermediates / --no-keep-intermediates` (default `--no-keep-intermediates` so the runner doesn't run out of disk).
+* Define `SOURCE_PBF_URL` and `SOURCE_MD5_URL` as module-level constants (single source of truth — see §1.1). Do not duplicate the URL string.
 * Replace `SCRIPTMADE_<timestamp>` naming with `<base-name>_<date>`.
 * Emit final filenames `${output_dir}/${base_name}_${date}.pmtiles` and (per D1) `${output_dir}/${base_name}_${date}.osm.pbf`.
+* The downloaded source PBF (when fetched by the script) is treated as an intermediate: deleted on clean exit unless `--keep-intermediates`. It is **never** the same file as the bbox-extracted region PBF that gets uploaded to the release.
 * On clean exit, delete intermediates if `--no-keep-intermediates`.
 * On nonzero exit anywhere, fail the workflow (`set -e` semantics; `run()` already does `sys.exit(1)`, but exit codes must be preserved).
 * Preserve the existing OMT normalisation logic exactly — this is **not** a refactor of map content, only of I/O.
-* Add a module-level docstring noting the new CLI surface.
+* Add a module-level docstring noting the new CLI surface and the dynamic-fetch behaviour.
+
+**Note on responsibility for downloading:** the CI workflow (§4.2) is the canonical downloader in production — it handles retries, backoff, and `.md5` verification using shell tooling. The script's built-in download is a convenience for local runs only and may use a simpler best-effort implementation (single attempt, optional md5 check). If `--source-pbf` is passed, the script does no network IO at all.
 
 ### 4.2 `.github/workflows/release-tiles.yml` — new
 
@@ -149,8 +169,8 @@ Step outline:
 2. `actions/setup-python@<SHA>` with Python 3.12.
 3. Install system deps (`osmium-tool`, `tippecanoe`). Cache per D7.
 4. Compute `DATE` once, export to `$GITHUB_ENV` and `$GITHUB_OUTPUT`.
-5. Download Geofabrik `us-northeast-latest.osm.pbf` with polite retry/backoff. Verify against Geofabrik's published `.md5`. Fail loudly on mismatch.
-6. Run `python generate_tiles_pb.py --base-name philly_commute_region --date "$DATE" --output-dir ./out`.
+5. Download the source PBF dynamically from `SOURCE_PBF_URL` (see §1.1) into `${RUNNER_TEMP}/us-northeast-latest.osm.pbf` with polite retry/backoff (3 attempts, exponential). Fetch `SOURCE_MD5_URL` and verify the downloaded file's md5 against it. Fail loudly on mismatch. The PBF must land in ephemeral runner storage — never the repo workspace root, never checked in.
+6. Run `python generate_tiles_pb.py --base-name philly_commute_region --date "$DATE" --output-dir ./out --source-pbf "${RUNNER_TEMP}/us-northeast-latest.osm.pbf"` (passing `--source-pbf` explicitly suppresses the script's built-in download path; the workflow owns the network IO).
 7. Generate `sha256` files: `sha256sum philly_commute_region_${DATE}.pmtiles > philly_commute_region_${DATE}.pmtiles.sha256` (and likewise for the PBF).
 8. Create dated release `tiles-${DATE}` with tag `tiles-${DATE}`, title `Tiles ${DATE}`, body containing source URL, source md5, bbox, git SHA of the workflow run. Upload versioned assets. Use `gh release create`.
 9. Copy/rename the same files to `philly_commute_region_current.*` and upload them to (or update) a release with the **fixed** tag `current`. Use `gh release upload --clobber` to overwrite. Create the `current` release on first run if it does not exist.
@@ -283,12 +303,19 @@ You are working on the repo at /home/joe/lovmaps. Read CLAUDE.md and CLAUDE_REFE
 Task: Refactor `generate_tiles_pb.py` per §4.1 of the plan. Specifically:
 
 1. Add an argparse-based CLI with these flags (defaults in parens):
-   --source-pbf PATH (us-northeast-latest.osm.pbf)
+   --source-pbf PATH (no default — if omitted, script downloads from --source-url)
+   --source-url URL  (https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf — see §1.1)
    --bbox STR        (-76.00,39.60,-74.60,40.40)
    --base-name STR   (philly_commute_region)
    --date STR        (auto-generated as SS-MM-HH-DD-MM-YYYY in UTC if omitted; see plan D3)
    --output-dir PATH (.)
    --keep-intermediates / --no-keep-intermediates (default: no-keep)
+
+   Define module-level constants `SOURCE_PBF_URL` and `SOURCE_MD5_URL` (the Geofabrik URLs from §1.1) and use them as defaults / for the optional md5 check. Do not hard-code the URL string anywhere else in the file.
+
+   When `--source-pbf` is omitted, download `--source-url` to `<output-dir>/us-northeast-latest.osm.pbf` (or a tempfile), best-effort md5 check, then proceed. When `--source-pbf` is given, do no network IO. Treat the downloaded PBF as an intermediate (delete on clean exit unless --keep-intermediates).
+
+   The source PBF must never be committed. Add `*.osm.pbf`, `*.pmtiles`, `*.geojsonseq` to `.gitignore` if not already present.
 
 2. Replace the existing SCRIPTMADE_<timestamp> naming with <base-name>_<date> for the final pmtiles and the bbox-extracted region PBF. Per-layer intermediates may keep their existing names since they are deleted at the end unless --keep-intermediates.
 
@@ -328,8 +355,8 @@ Task: Create `.github/workflows/release-tiles.yml` implementing the workflow des
 4. Pin every third-party action to a full commit SHA with a trailing version comment.
 5. Install osmium-tool and tippecanoe. Determine whether tippecanoe is available via apt on ubuntu-latest; if not, build from the official felt/tippecanoe source release and cache the binary keyed on the source release tag.
 6. Compute DATE once as SS-MM-HH-DD-MM-YYYY (UTC) and export via $GITHUB_ENV and step outputs. (If §3 D3 has been changed by the human reviewer, follow that.)
-7. Download Geofabrik https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf with retry/backoff (3 tries, exponential). Verify against the Geofabrik-published .md5 sibling URL. Fail on mismatch.
-8. Run: `python generate_tiles_pb.py --base-name philly_commute_region --date "$DATE" --output-dir ./out --source-pbf ./us-northeast-latest.osm.pbf`.
+7. Download the source PBF from https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf (the canonical SOURCE_PBF_URL — see §1.1) to `${RUNNER_TEMP}/us-northeast-latest.osm.pbf` with retry/backoff (3 tries, exponential). Verify against the Geofabrik-published .md5 sibling URL. Fail on mismatch. The PBF must land in ephemeral runner storage (`$RUNNER_TEMP` or `/tmp`) — never the repo workspace root, never committed.
+8. Run: `python generate_tiles_pb.py --base-name philly_commute_region --date "$DATE" --output-dir ./out --source-pbf "${RUNNER_TEMP}/us-northeast-latest.osm.pbf"`. Passing `--source-pbf` explicitly suppresses the script's built-in download path; the workflow owns the network IO and md5 verification.
 9. Sanity-check final .pmtiles is > 100 KB.
 10. Generate sha256 sidecars matching `sha256sum` format (so `sha256sum -c file.sha256` works).
 11. If a release with tag `tiles-${DATE}` already exists, fail with a clear message — never overwrite dated assets.
