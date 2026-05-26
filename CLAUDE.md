@@ -2,6 +2,8 @@
 
 Welcome to the repository! If you are an AI assistant, coding agent, or automated tool interacting with this codebase, you **MUST** strictly adhere strictly to the following rules. This is an open-source, nonprofit repository with specific operational and cost-related constraints.
 
+Check the CLAUDE_REFERENCE directory for instructions before asking the user or searching further.
+
 ## 🚨 CRITICAL Git & Permission Restrictions
 
 1. **Human Approval Required:** All code merged into the `main` branch MUST be explicitly approved and merged by the human owner, `@jos-eph`. Do not attempt to bypass pull request reviews or auto-merge code.
