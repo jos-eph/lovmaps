@@ -2,7 +2,7 @@
 
 > **Audience:** This document is written for a human reviewer (`@jos-eph`) to make decisions, and then to be handed to an agentic coding agent (primarily **Claude Code with Opus 4.7**; some isolated tasks may be delegated to **aider + qwen3-coder-next** which has a **64,000-token context window**).
 >
-> **Status:** Draft. Sections marked **🟡 DECISION** require human input before the plan is handed off.
+> **Status:** *Reviewed*. Sections marked **🟡 DECISION** requireed human input before the plan is handed off, and the input should now be there. Stop and ask if it's not.
 
 ---
 
@@ -94,17 +94,17 @@ Please fill in each decision by replacing the placeholder with your choice (or n
 
 | ID | Decision | Recommendation | Your choice |
 |----|----------|----------------|-------------|
-| **D1** | Which PBFs to publish per run? <br/>Options: (a) only the final `.pmtiles`; (b) `.pmtiles` + the bbox-extracted region `.osm.pbf`; (c) all per-layer PBFs too. | **(b)** — bbox PBF is small (a few MB), reproducible, and useful to downstream tooling. Per-layer PBFs are intermediates and add quota pressure. | _________ |
-| **D2** | SHA filename suffix? Original brief says `.sha`, but `.sha256` is the de-facto standard and more self-describing. | **`.sha256`**. Contents = single line `<hex>  <filename>` (matches `sha256sum` output, so consumers can verify with `sha256sum -c`). | _________ |
-| **D3** | Exact `<DATE>` format. Brief specifies *seconds-minutes-hours-day-month*. Year is not mentioned but is almost certainly needed for sortability and to disambiguate annual recurrence. | **`SS-MM-HH-DD-MM-YYYY`** zero-padded, UTC, e.g. `42-17-08-26-05-2026`. (If you'd prefer naturally-sortable ISO-ish, say so — but the brief is explicit, so we keep the requested order and only append year.) | _________ |
-| **D4** | Two-release pattern (dated immutable + `current` pointer)? | **Approve.** Simpler than asset-renaming inside a single release and cleanly separates "pinned" vs "rolling" consumers. | _________ |
-| **D5** | Daily schedule time (UTC). Geofabrik publishes new daily extracts ~01:00–03:00 UTC. | **`30 4 * * *`** (04:30 UTC) — safely after Geofabrik refresh, outside US peak. | _________ |
-| **D6** | Retention of dated releases. Unbounded growth is fine until storage matters, but pruning is healthy. | **Keep the most recent 30 dated releases**, prune older ones with a small cleanup step at the end of the workflow. `current` is never pruned. | _________ |
-| **D7** | Cache `apt` packages (osmium-tool, tippecanoe) via `actions/cache`? Saves ~30–60s per run. | **Yes**, but only if tippecanoe is available as an apt package on `ubuntu-latest`; otherwise build-from-source and cache the resulting binary. Agent should determine and document. | _________ |
-| **D8** | Branch-protection ruleset on `main` (see §6). | **Approve recommended ruleset** as written. | _________ |
-| **D9** | Should the workflow file live at `.github/workflows/release-tiles.yml` (one file) or be split (build + publish)? | **Single file.** Simplicity, fewer moving parts, easier to reason about cost. | _________ |
-| **D10** | Notification on failure? GitHub already emails on failed scheduled workflows for the repo owner, but you may want a dedicated channel. | **Rely on default email** for now; revisit if noisy. | _________ |
-| ~~D11~~ | ~~License/attribution file embedded in each release?~~ | **Decided: yes.** `ATTRIBUTION.txt` will be created at repo root and uploaded with every release. Contents must mirror the README's map-data notice (© OpenStreetMap contributors, © Protomaps) and include the ODbL 1.0 license terms (either inline, or by including the full text of `MAP-DATA-LICENSE.md`). See §4.3. | n/a |
+| **D1** | Which PBFs to publish per run? <br/>Options: (a) only the final `.pmtiles`; (b) `.pmtiles` + the bbox-extracted region `.osm.pbf`; (c) all per-layer PBFs too. | **(b)** — bbox PBF is small (a few MB), reproducible, and useful to downstream tooling. Per-layer PBFs are intermediates and add quota pressure. | _Option b_____ |
+| **D2** | SHA filename suffix? Original brief says `.sha`, but `.sha256` is the de-facto standard and more self-describing. | **`.sha256`**. Contents = single line `<hex>  <filename>` (matches `sha256sum` output, so consumers can verify with `sha256sum -c`). | ___.sha256______ |
+| **D3** | Exact `<DATE>` format. Brief specifies *seconds-minutes-hours-day-month*. Year is not mentioned but is almost certainly needed for sortability and to disambiguate annual recurrence. | **`SS-MM-HH-DD-MM-YYYY`** zero-padded, UTC, e.g. `42-17-08-26-05-2026`. (If you'd prefer naturally-sortable ISO-ish, say so — but the brief is explicit, so we keep the requested order and only append year.) | naturally sortable ISO, please |
+| **D4** | Two-release pattern (dated immutable + `current` pointer)? | **Approve.** Simpler than asset-renaming inside a single release and cleanly separates "pinned" vs "rolling" consumers. | _2-release pattern approved_ |
+| **D5** | Daily schedule time (UTC). Geofabrik publishes new daily extracts ~01:00–03:00 UTC. | **`30 4 * * *`** (04:30 UTC) — safely after Geofabrik refresh, outside US peak. | approved |
+| **D6** | Retention of dated releases. Unbounded growth is fine until storage matters, but pruning is healthy. | **Keep the most recent 30 dated releases**, prune older ones with a small cleanup step at the end of the workflow. `current` is never pruned. | approved |
+| **D7** | Cache `apt` packages (osmium-tool, tippecanoe) via `actions/cache`? Saves ~30–60s per run. | **Yes**, but only if tippecanoe is available as an apt package on `ubuntu-latest`; otherwise build-from-source and cache the resulting binary. Agent should determine and document. | approved |
+| **D8** | Branch-protection ruleset on `main` (see §6). | **Approve recommended ruleset** as written. | _approve___ |
+| **D9** | Should the workflow file live at `.github/workflows/release-tiles.yml` (one file) or be split (build + publish)? | **Single file.** Simplicity, fewer moving parts, easier to reason about cost. | _Single file__ |
+| **D10** | Notification on failure? GitHub already emails on failed scheduled workflows for the repo owner, but you may want a dedicated channel. | **Rely on default email** for now; revisit if noisy. | _approved___ |
+| ~~D11~~ | ~~License/attribution file embedded in each release?~~ | **Decided: yes.** `ATTRIBUTION.txt` will be created at repo root and uploaded with every release. Contents must mirror the README's map-data notice (© OpenStreetMap contributors, © Protomaps) and include the ODbL 1.0 license terms (either inline, or by including the full text of `MAP-DATA-LICENSE.md`). See §4.3. | yes, approved |
 
 ---
 
@@ -483,4 +483,6 @@ Any of the above is a separate plan.
 
 * Do you want the daily workflow active immediately on merge, or paused (`if: false`) until you flip a switch? Default assumption: **active immediately**.
 * Should the workflow have an opt-out kill switch (a repo variable, e.g. `RELEASE_PIPELINE_ENABLED`) the human can toggle without editing the file? Recommended: **yes**, single `vars.RELEASE_PIPELINE_ENABLED == 'true'` gate on the publish step.
+  * HUMAN: I agree with the recommendation.
 * Any consumers already pinning to specific URLs we should be careful not to break? If yes, document them so the agent doesn't accidentally rename.
+  * No existing consumers.
