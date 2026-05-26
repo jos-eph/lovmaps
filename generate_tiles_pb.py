@@ -12,13 +12,51 @@ Pipeline:
 Output pmtiles will have these source-layers, matching style.json:
   transportation, transportation_name, water, landcover, landuse,
   boundary, place, poi
+
+CLI:
+  python generate_tiles_pb.py
+      [--source-pbf PATH] [--source-url URL]
+      [--bbox MINLON,MINLAT,MAXLON,MAXLAT]
+      [--base-name NAME] [--date STR]
+      [--output-dir DIR]
+      [--keep-intermediates | --no-keep-intermediates]
+
+Source PBF handling:
+  - If --source-pbf is given, the script uses it directly and performs no
+    network I/O. This is the path used by the CI workflow, which owns
+    download / retry / md5 verification.
+  - If --source-pbf is omitted, the script downloads --source-url
+    (default: the Geofabrik us-northeast extract) into --output-dir as a
+    convenience for local runs. The downloaded source PBF is treated as
+    an intermediate and removed on clean exit unless --keep-intermediates.
+
+Final outputs (always emitted):
+  <output-dir>/<base-name>_<date>.osm.pbf   (bbox-extracted region)
+  <output-dir>/<base-name>_<date>.pmtiles   (multi-layer OMT pmtiles)
+
+<date> defaults to an ISO 8601 UTC timestamp YYYY-MM-DDTHH-MM-SSZ
+(naturally sortable, filename-safe; per plan decision D3).
 """
 
+import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+# Canonical upstream source — single source of truth. See
+# CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md §1.1. Any change here is an
+# explicit, reviewed decision.
+SOURCE_PBF_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf"
+SOURCE_MD5_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf.md5"
+
+DEFAULT_BBOX = "-76.00,39.60,-74.60,40.40"  # SEPTA service region
+DEFAULT_BASE_NAME = "philly_commute_region"
 
 
 def run(cmd):
@@ -296,41 +334,190 @@ LAYERS = [
 ]
 
 
-def main():
-    source_pbf = "us-northeast-latest.osm.pbf"
-    if not os.path.exists(source_pbf):
-        print(f"Error: missing '{source_pbf}'. Download it first.")
+# ---------- Source PBF handling ----------
+
+def default_date_stamp():
+    # Per CI_CD_RELEASE_PLAN.md D3: naturally sortable ISO 8601, UTC,
+    # filename-safe (`:` replaced with `-`).
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+
+
+def md5_of_file(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fetch_expected_md5(url):
+    # Geofabrik .md5 sidecar format: "<hex>  <filename>\n"
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        text = resp.read().decode("utf-8", errors="replace").strip()
+    parts = text.split()
+    return parts[0] if parts else ""
+
+
+def download_source_pbf(source_url, md5_url, dest_path):
+    """Single-attempt, best-effort download with optional md5 verification.
+
+    The CI workflow does its own retry/backoff and strict md5 verification
+    before invoking the script with --source-pbf, so this path is only used
+    for local convenience runs.
+    """
+    print(f"\n=== Downloading source PBF ===\n  {source_url}\n  -> {dest_path}")
+    urllib.request.urlretrieve(source_url, dest_path)
+
+    try:
+        expected = fetch_expected_md5(md5_url)
+    except Exception as e:
+        print(f"[WARN] could not fetch md5 sidecar ({e}); skipping verification")
+        return
+
+    if not expected:
+        print("[WARN] md5 sidecar was empty; skipping verification")
+        return
+
+    actual = md5_of_file(dest_path)
+    if actual.lower() != expected.lower():
+        print(f"[ERROR] md5 mismatch for {dest_path}")
+        print(f"  expected: {expected}")
+        print(f"  actual:   {actual}")
         sys.exit(1)
+    print(f"[OK] md5 verified: {actual}")
 
-    bbox = "-76.00,39.60,-74.60,40.40"  # SEPTA service region
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = f"SCRIPTMADE_{timestamp}"
-    region_pbf = f"{prefix}_region.osm.pbf"
-    final_pmtiles = f"{prefix}_omt.pmtiles"
+# ---------- Main ----------
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description=(
+            "Build an OpenMapTiles-compatible .pmtiles archive for the "
+            "Philadelphia commute region from a Geofabrik OSM extract."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--source-pbf",
+        default=None,
+        help=(
+            "Path to a local OSM .pbf to use as input. If omitted, the script "
+            "downloads --source-url into --output-dir. Pass this flag in CI; "
+            "passing it suppresses all network I/O."
+        ),
+    )
+    p.add_argument(
+        "--source-url",
+        default=SOURCE_PBF_URL,
+        help="URL to download when --source-pbf is not given.",
+    )
+    p.add_argument(
+        "--bbox",
+        default=DEFAULT_BBOX,
+        help='Bounding box "minlon,minlat,maxlon,maxlat".',
+    )
+    p.add_argument(
+        "--base-name",
+        default=DEFAULT_BASE_NAME,
+        help="Stem for output filenames: <base-name>_<date>.{osm.pbf,pmtiles}.",
+    )
+    p.add_argument(
+        "--date",
+        default=None,
+        help=(
+            "Date stamp embedded in output filenames. Defaults to a UTC "
+            "ISO 8601 timestamp (YYYY-MM-DDTHH-MM-SSZ) generated at start of run."
+        ),
+    )
+    p.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory for output files (and per-layer intermediates).",
+    )
+    keep_group = p.add_mutually_exclusive_group()
+    keep_group.add_argument(
+        "--keep-intermediates",
+        dest="keep_intermediates",
+        action="store_true",
+        help="Retain per-layer .osm.pbf / .geojsonseq files (and the source PBF if downloaded).",
+    )
+    keep_group.add_argument(
+        "--no-keep-intermediates",
+        dest="keep_intermediates",
+        action="store_false",
+        help="Delete intermediates on clean exit (default).",
+    )
+    p.set_defaults(keep_intermediates=False)
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    date_stamp = args.date or default_date_stamp()
+    stem = f"{args.base_name}_{date_stamp}"
+
+    region_pbf = output_dir / f"{stem}.osm.pbf"
+    final_pmtiles = output_dir / f"{stem}.pmtiles"
+
+    intermediates = []
+
+    # Resolve source PBF (provided locally, or downloaded as a convenience).
+    if args.source_pbf:
+        source_pbf = Path(args.source_pbf)
+        if not source_pbf.exists():
+            print(f"Error: --source-pbf '{source_pbf}' does not exist.")
+            sys.exit(1)
+        downloaded_source = False
+    else:
+        source_pbf = output_dir / "us-northeast-latest.osm.pbf"
+        if source_pbf.exists():
+            print(f"[INFO] reusing existing source PBF at {source_pbf}")
+        else:
+            download_source_pbf(args.source_url, SOURCE_MD5_URL, str(source_pbf))
+        downloaded_source = True
+        intermediates.append(source_pbf)
 
     print(f"Pipeline output: {final_pmtiles}")
 
-    extract_region(source_pbf, bbox, region_pbf)
+    extract_region(str(source_pbf), args.bbox, str(region_pbf))
 
     layer_files = []
     for layer in LAYERS:
         name = layer["name"]
         print(f"\n=== Layer: {name} ===")
-        layer_pbf = f"{prefix}_{name}.osm.pbf"
-        raw_geojson = f"{prefix}_{name}.raw.geojsonseq"
-        norm_geojson = f"{prefix}_{name}.geojsonseq"
-        filter_layer(region_pbf, layer["filter"], layer_pbf)
-        export_geojsonseq(layer_pbf, raw_geojson)
-        normalize_geojsonseq(raw_geojson, norm_geojson, layer["normalize"])
-        layer_files.append((name, norm_geojson))
+        layer_pbf = output_dir / f"{stem}_{name}.osm.pbf"
+        raw_geojson = output_dir / f"{stem}_{name}.raw.geojsonseq"
+        norm_geojson = output_dir / f"{stem}_{name}.geojsonseq"
+        filter_layer(str(region_pbf), layer["filter"], str(layer_pbf))
+        export_geojsonseq(str(layer_pbf), str(raw_geojson))
+        normalize_geojsonseq(str(raw_geojson), str(norm_geojson), layer["normalize"])
+        layer_files.append((name, str(norm_geojson)))
+        intermediates.extend([layer_pbf, raw_geojson, norm_geojson])
 
-    generate_pmtiles(layer_files, final_pmtiles)
+    generate_pmtiles(layer_files, str(final_pmtiles))
 
-    print(f"\nDone: {final_pmtiles}")
-    print(f"To use it:")
-    print(f"  mv {final_pmtiles} target.pmtiles")
-    print(f"  docker compose down && docker compose up")
+    if not args.keep_intermediates:
+        print("\n=== Cleaning up intermediates ===")
+        for path in intermediates:
+            try:
+                os.remove(path)
+                print(f"  removed {path}")
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"  [WARN] could not remove {path}: {e}")
+    else:
+        if downloaded_source:
+            print(f"[INFO] keeping downloaded source PBF: {source_pbf}")
+        print("[INFO] keeping per-layer intermediates")
+
+    print(f"\nDone:")
+    print(f"  region PBF: {region_pbf}")
+    print(f"  pmtiles:    {final_pmtiles}")
 
 
 if __name__ == "__main__":
