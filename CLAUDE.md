@@ -11,7 +11,7 @@ Check the CLAUDE_REFERENCE directory for instructions before asking the user or 
     * **Agent Action:** You may generate code, draft commit messages, and provide step-by-step Git commands (e.g., `git checkout -b`, `git commit -m`), but you must **pause and wait** for `@jos-eph` to execute the push. Do not attempt to push directly using APIs or automated scripts.
 3. **Branch Protection:** NEVER push directly to the `main` branch. All work must be done on feature branches.
 4. **Branch Retention:** NEVER delete a branch, locally or remotely. Even if a branch has been merged, leave branch management and cleanup entirely to `@jos-eph`.
-5. **Branch Safety:** Agents are ONLY allowed to make changes or add information on a branch with the suffix _claude. If the branch does not exist, the agent should create it.5
+5. **Branch Safety:** Agents are ONLY allowed to make changes or add information on a branch with the suffix _agent_permitted. If the branch does not exist, the agent should create it.
 ## 💰 Cost Constraints & Nonprofit Rules
 
 This is a nonprofit project. You must NEVER suggest, implement, or execute anything that could incur charges on GitHub.

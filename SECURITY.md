@@ -4,7 +4,7 @@
 
 If you believe you have found a security issue in this repository or in any
 artefact it publishes (the `.pmtiles` / `.pbf` files distributed via GitHub
-Releases), please report it privately by email to **josephdm@gmail.com**.
+Releases), please report it privately by email to Joe **jos-eph@dydx.org**.
 
 Please include:
 
@@ -12,21 +12,17 @@ Please include:
 - The steps required to reproduce it.
 - The relevant commit SHA, release tag, or asset filename.
 
-You should expect an acknowledgement within a reasonable time, given that
-this is a single-maintainer nonprofit project. GitHub's **private
-vulnerability reporting** is also enabled if you prefer to file through the
+GitHub's **private vulnerability reporting** is also enabled if you prefer to file through the
 GitHub UI.
 
-## Bug bounty
+## No bug bounty
 
-No bug bounty is offered. This is a nonprofit project. Thanks for helping
-anyway.
+No bug bounty is offered. This is a nonprofit project.
 
 ## Supported versions
 
-Only the **latest release** is supported. Older dated releases
-(`tiles-<DATE>`) remain available for reproducibility but will not receive
-security fixes; fixes land in the next dated release and in `current`.
+Older dated releases (`tiles-<DATE>`) remain available for reproducibility but will not receive updates.
+Updates land in the next dated release and in `current`.
 
 ## Scope
 

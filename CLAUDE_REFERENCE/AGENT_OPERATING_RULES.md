@@ -26,7 +26,7 @@ The user pays for context. Agents must self-monitor and stop cleanly before exha
 
 ### 7.2 Branch & push discipline
 
-* Work only on a branch suffixed `_claude`. Create one (e.g. `001/initial_setup_claude`) if absent.
+* Work only on a branch suffixed `agent_permitted`. Create one (e.g. `001/initial_setup_agent_permitted`) if absent.
 * Never push. Never merge. Never delete branches. Never amend a commit that exists on origin.
 * Commit often with descriptive messages. Small commits are preferred so `@jos-eph` can review per-step.
 

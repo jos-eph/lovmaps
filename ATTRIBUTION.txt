@@ -8,7 +8,7 @@
 Attribution and License for the .pbf and .pmtiles Assets in This Release
 ==============================================================================
 
-Map data (.pbf and .pmtiles files) © OpenStreetMap contributors © Protomaps,
+Map data (.pbf and .pmtiles files) © OpenStreetMap contributors © Geofabrik,
 available under the ODbL (Open Database License) 1.0.
 
 The full text of the ODbL 1.0 is reproduced below.

@@ -65,6 +65,8 @@ this notice along with the full text of the ODbL 1.0; see also
 [`MAP-DATA-LICENSE.md`](MAP-DATA-LICENSE.md) in this repository.
 
 ## Copyright and License
-Map data (`.pbf` and `.pmtiles` files) © OpenStreetMap contributors © Protomaps, available under the ODbL (Open Database License) 1.0. 
+Map data (`.pbf` and `.pmtiles` files) © OpenStreetMap contributors © Geofabrik, available under the ODbL (Open Database License) 1.0. 
 
 All other files © Joseph D. Mirarchi, available under a 3-clause BSD license.
+
+Processing made possible by open-source tooling.
