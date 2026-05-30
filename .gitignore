@@ -1,0 +1,9 @@
+# Large OSM / tile artifacts must never enter the git tree.
+# See CLAUDE.md and CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md §1.1.
+*.osm.pbf
+*.pmtiles
+*.geojsonseq
+
+# Python
+__pycache__/
+*.pyc
