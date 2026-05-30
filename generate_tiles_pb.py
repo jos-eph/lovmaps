@@ -58,6 +58,17 @@ SOURCE_MD5_URL = "https://download.geofabrik.de/north-america/us-northeast-lates
 DEFAULT_BBOX = "-76.00,39.60,-74.60,40.40"  # SEPTA service region
 DEFAULT_BASE_NAME = "philly_commute_region"
 
+# Attribution string embedded directly in the .pmtiles metadata so the OSM +
+# Geofabrik copyright travels with the file and is rendered by map clients
+# (MapLibre/Leaflet read this from the tileset metadata). This MUST stay in
+# sync with the map-data notice in ATTRIBUTION.txt and README.md
+# ("Copyright and License"). See CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md §4.3.
+MAP_ATTRIBUTION = (
+    '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
+    'contributors © <a href="https://www.geofabrik.de/">Geofabrik</a> '
+    '(<a href="https://opendatacommons.org/licenses/odbl/1-0/">ODbL 1.0</a>)'
+)
+
 
 def run(cmd):
     print(f"\n[RUNNING] {' '.join(cmd)}")
@@ -257,6 +268,11 @@ def generate_pmtiles(layer_files, output_pmtiles, min_zoom="10", max_zoom="13"):
         "tippecanoe",
         "-o", output_pmtiles,
         "--force",
+        # Embed OSM + Geofabrik copyright in the tileset metadata so the
+        # attribution travels inside the .pmtiles file itself, not just in the
+        # sidecar ATTRIBUTION.txt. Map clients render --attribution on the map.
+        "--name", "Philadelphia commute region (OpenStreetMap / Geofabrik)",
+        "--attribution", MAP_ATTRIBUTION,
         f"-Z{min_zoom}",
         f"-z{max_zoom}",
         "--drop-densest-as-needed",

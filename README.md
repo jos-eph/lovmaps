@@ -64,6 +64,13 @@ below. Every release also includes an `ATTRIBUTION.txt` file that reproduces
 this notice along with the full text of the ODbL 1.0; see also
 [`MAP-DATA-LICENSE.md`](MAP-DATA-LICENSE.md) in this repository.
 
+The `.pmtiles` assets additionally carry this attribution **embedded in their
+tileset metadata** (via tippecanoe's `--attribution`), so the OSM + Geofabrik
+copyright renders automatically in map clients such as MapLibre and Leaflet —
+no separate configuration required. The OSM PBF format has no standard embedded
+copyright field, so the `.osm.pbf` assets rely on the accompanying
+`ATTRIBUTION.txt` and the notice below.
+
 ## Copyright and License
 Map data (`.pbf` and `.pmtiles` files) © OpenStreetMap contributors © Geofabrik, available under the ODbL (Open Database License) 1.0. 
 
