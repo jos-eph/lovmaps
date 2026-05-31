@@ -48,7 +48,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-
+#### DEBUG
+print(f"Arguments sent to generate_tiles_pb, {sys.argv = }")
+###
 # Canonical upstream source — single source of truth. See
 # CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md §1.1. Any change here is an
 # explicit, reviewed decision.

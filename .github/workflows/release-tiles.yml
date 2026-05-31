@@ -187,7 +187,7 @@ jobs:
             --base-name "${BASE_NAME}" \
             --date "${DATE}" \
             --output-dir ./out \
-            --bbox "${BBOX}" \
+            --bbox="${BBOX}" \
             --source-pbf "${RUNNER_TEMP}/us-northeast-latest.osm.pbf"
 
       - name: Sanity-check outputs
