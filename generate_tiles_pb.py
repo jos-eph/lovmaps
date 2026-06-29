@@ -246,6 +246,47 @@ def normalize_boundary_geojsonseq(input_path, output_path):
     print(f"  normalized {n_out} boundary lines from {n_in} features -> {output_path}")
 
 
+class BoundaryAssertionError(Exception):
+    """Raised when the normalized boundary GeoJSONSeq is not lines-only."""
+
+
+def assert_boundary_lines_only(path):
+    """Fail fast before tiling if the boundary layer is not LineString-only.
+
+    Guards against the box-grid regression and the silent-no-match failure mode:
+    a Polygon/MultiPolygon feature, or an admin_level that is not a JSON Number,
+    aborts the run with a descriptive message. Streaming line read — negligible
+    cost, so it is safe to run on every CI build.
+    """
+    n = 0
+    with open(path, "r", encoding="utf-8") as fin:
+        for lineno, line in enumerate(fin, start=1):
+            line = line.strip().strip("\x1e")
+            if not line:
+                continue
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n += 1
+            gtype = (feat.get("geometry") or {}).get("type")
+            if gtype not in ("LineString", "MultiLineString"):
+                raise BoundaryAssertionError(
+                    f"{path}:{lineno}: boundary feature has geometry type "
+                    f"{gtype!r}; expected LineString. Area polygons must be "
+                    f"converted to lines before tiling (see "
+                    f"normalize_boundary_geojsonseq)."
+                )
+            al = (feat.get("properties") or {}).get("admin_level")
+            if not isinstance(al, int) or isinstance(al, bool):
+                raise BoundaryAssertionError(
+                    f"{path}:{lineno}: admin_level is {al!r} ({type(al).__name__}); "
+                    f"expected a JSON Number. A string admin_level silently "
+                    f"matches nothing in the -j filter and the downstream style."
+                )
+    print(f"  boundary assertion passed: {n} features, all LineString")
+
+
 def normalize_place(props):
     p = props.get("place")
     if p not in ("city", "town", "suburb", "neighbourhood"):
@@ -421,6 +462,7 @@ LAYERS = [
         # unit tests / reference; normalize_seq takes precedence in main().
         "normalize": normalize_boundary,
         "normalize_seq": normalize_boundary_geojsonseq,
+        "assert_lines_only": True,
     },
     {
         "name": "place",
@@ -603,6 +645,8 @@ def main(argv=None):
             normalize_seq(str(raw_geojson), str(norm_geojson))
         else:
             normalize_geojsonseq(str(raw_geojson), str(norm_geojson), layer["normalize"])
+        if layer.get("assert_lines_only"):
+            assert_boundary_lines_only(str(norm_geojson))
         layer_files.append((name, str(norm_geojson)))
         intermediates.extend([layer_pbf, raw_geojson, norm_geojson])
 
