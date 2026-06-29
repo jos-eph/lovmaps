@@ -287,6 +287,140 @@ def assert_boundary_lines_only(path):
     print(f"  boundary assertion passed: {n} features, all LineString")
 
 
+# County name labels. Counties are admin_level 6 areas; we emit one label Point
+# per county into the `place` layer (class == "county") so the downstream style
+# can render a geographic label for it. minzoom 6 keeps them from being dropped.
+COUNTY_LABEL_TIPPECANOE = {"minzoom": 6}
+
+
+def _ring_signed_area(ring):
+    """Shoelace signed area of a (closed) ring in coordinate units."""
+    a = 0.0
+    for i in range(len(ring) - 1):
+        x0, y0 = ring[i][0], ring[i][1]
+        x1, y1 = ring[i + 1][0], ring[i + 1][1]
+        a += x0 * y1 - x1 * y0
+    return a * 0.5
+
+
+def _ring_centroid(ring):
+    """Area-weighted centroid of a single (closed) ring -> [x, y].
+
+    Falls back to the vertex average for a degenerate (zero-area) ring.
+    """
+    a = cx = cy = 0.0
+    for i in range(len(ring) - 1):
+        x0, y0 = ring[i][0], ring[i][1]
+        x1, y1 = ring[i + 1][0], ring[i + 1][1]
+        cross = x0 * y1 - x1 * y0
+        a += cross
+        cx += (x0 + x1) * cross
+        cy += (y0 + y1) * cross
+    if a == 0:
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        return [sum(xs) / len(xs), sum(ys) / len(ys)]
+    a *= 0.5
+    return [cx / (6 * a), cy / (6 * a)]
+
+
+def _geometry_area(geometry):
+    """Absolute exterior-ring area of a Polygon / MultiPolygon (0 otherwise)."""
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "Polygon" and coords:
+        return abs(_ring_signed_area(coords[0]))
+    if gtype == "MultiPolygon":
+        return sum(abs(_ring_signed_area(poly[0])) for poly in coords if poly)
+    return 0.0
+
+
+def county_label_point(geometry):
+    """Representative interior label point for a county area, or None.
+
+    Uses the area-weighted centroid of the exterior ring; for a MultiPolygon it
+    picks the largest part. Adequate for county-sized, roughly-convex polygons
+    (a point-on-surface would be the refinement if a label ever lands outside).
+    """
+    if not geometry:
+        return None
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if not coords:
+        return None
+    if gtype == "Polygon":
+        return _ring_centroid(coords[0])
+    if gtype == "MultiPolygon":
+        best_ring = None
+        best_area = -1.0
+        for poly in coords:
+            if not poly:
+                continue
+            area = abs(_ring_signed_area(poly[0]))
+            if area > best_area:
+                best_area = area
+                best_ring = poly[0]
+        return _ring_centroid(best_ring) if best_ring is not None else None
+    return None
+
+
+def iter_county_labels(raw_boundary_path):
+    """Yield one `place` label Point per named county (admin_level 6).
+
+    Reads the RAW boundary export (which still carries `name`; the normalized
+    boundary layer drops it). A consolidated city-county such as Philadelphia is
+    both admin_level 6 and 8 — selecting level 6 only yields exactly one county
+    label for it. Deduplicated by name, keeping the largest-area geometry.
+    """
+    best_by_name = {}  # name -> (area, geometry)
+    with open(raw_boundary_path, "r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip().strip("\x1e")
+            if not line:
+                continue
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            props = feat.get("properties") or {}
+            try:
+                al = int(props.get("admin_level"))
+            except (ValueError, TypeError):
+                continue
+            if al != 6:
+                continue
+            name = props.get("name")
+            if not name:
+                continue
+            geom = feat.get("geometry") or {}
+            if geom.get("type") not in ("Polygon", "MultiPolygon"):
+                continue
+            area = _geometry_area(geom)
+            prev = best_by_name.get(name)
+            if prev is None or area > prev[0]:
+                best_by_name[name] = (area, geom)
+    for name, (_, geom) in best_by_name.items():
+        point = county_label_point(geom)
+        if point is None:
+            continue
+        yield {
+            "type": "Feature",
+            "tippecanoe": COUNTY_LABEL_TIPPECANOE,
+            "properties": {"class": "county", "name": name},
+            "geometry": {"type": "Point", "coordinates": point},
+        }
+
+
+def append_county_labels(raw_boundary_path, place_norm_path):
+    """Append county label features (from the boundary export) to the place layer."""
+    n = 0
+    with open(place_norm_path, "a", encoding="utf-8") as fout:
+        for feat in iter_county_labels(raw_boundary_path):
+            fout.write("\x1e" + json.dumps(feat, separators=(",", ":")) + "\n")
+            n += 1
+    print(f"  appended {n} county labels -> {place_norm_path}")
+
+
 def normalize_place(props):
     p = props.get("place")
     if p not in ("city", "town", "suburb", "neighbourhood"):
@@ -375,6 +509,7 @@ ZOOM_FILTERS = {
     "place": [
         "any",
         ["==", "class", "city"],
+        ["==", "class", "county"],
         ["all", [">=", "$zoom", 6],  ["==", "class", "town"]],
         ["all", [">=", "$zoom", 10], ["==", "class", "suburb"]],
         ["all", [">=", "$zoom", 12], ["==", "class", "neighbourhood"]],
@@ -632,12 +767,16 @@ def main(argv=None):
     extract_region(str(source_pbf), args.bbox, str(region_pbf))
 
     layer_files = []
+    raw_paths = {}
+    norm_paths = {}
     for layer in LAYERS:
         name = layer["name"]
         print(f"\n=== Layer: {name} ===")
         layer_pbf = output_dir / f"{stem}_{name}.osm.pbf"
         raw_geojson = output_dir / f"{stem}_{name}.raw.geojsonseq"
         norm_geojson = output_dir / f"{stem}_{name}.geojsonseq"
+        raw_paths[name] = raw_geojson
+        norm_paths[name] = norm_geojson
         filter_layer(str(region_pbf), layer["filter"], str(layer_pbf))
         export_geojsonseq(str(layer_pbf), str(raw_geojson))
         normalize_seq = layer.get("normalize_seq")
@@ -649,6 +788,13 @@ def main(argv=None):
             assert_boundary_lines_only(str(norm_geojson))
         layer_files.append((name, str(norm_geojson)))
         intermediates.extend([layer_pbf, raw_geojson, norm_geojson])
+
+    # County name labels: emit one place label per admin_level 6 area into the
+    # place layer (class == "county"). Derived from the raw boundary export
+    # (still carries name) while intermediates are present, before tiling.
+    if "boundary" in raw_paths and "place" in norm_paths:
+        print("\n=== County labels -> place layer ===")
+        append_county_labels(str(raw_paths["boundary"]), str(norm_paths["place"]))
 
     generate_pmtiles(layer_files, str(final_pmtiles))
 
