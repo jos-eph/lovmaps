@@ -175,6 +175,77 @@ def normalize_boundary(props):
     return {"admin_level": al}
 
 
+# Boundaries are forced kept from this zoom up so --drop-densest-as-needed
+# cannot strip the admin lines while it thins denser layers. Attached as a
+# top-level Feature member (sibling of properties/geometry) — the only place
+# tippecanoe reads per-feature directives.
+BOUNDARY_TIPPECANOE = {"minzoom": 10, "maxzoom": 13}
+
+
+def iter_boundary_linestrings(geometry):
+    """Yield LineString coordinate arrays for any admin boundary geometry.
+
+    Admin AREAS arrive as Polygon/MultiPolygon (a boundary relation — e.g.
+    Philadelphia's consolidated city-county — is assembled by `osmium export`
+    into an area, and is the *only* carrier of admin_level for that boundary).
+    A polygon ring is already a closed coordinate array, so the ring **is** its
+    own boundary line: converting here, before tiling, yields the true admin
+    perimeter (never a tile-clipped rectangle). Genuine LineStrings pass
+    through; anything else (Point/null) yields nothing.
+    """
+    if not geometry:
+        return
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if coords is None:
+        return
+    if gtype == "LineString":
+        yield coords
+    elif gtype == "MultiLineString":
+        yield from coords
+    elif gtype == "Polygon":
+        yield from coords
+    elif gtype == "MultiPolygon":
+        for polygon in coords:
+            yield from polygon
+
+
+def normalize_boundary_geojsonseq(input_path, output_path):
+    """Boundary layer: emit admin boundary LineStrings only (never area polygons).
+
+    Keeps admin_level as a Number in {4,6,8} via normalize_boundary, explodes
+    each kept feature's geometry into one LineString per ring/part, and stamps
+    each output feature with BOUNDARY_TIPPECANOE so boundaries survive
+    tile-budget dropping. Dropping the area polygons is what lets the downstream
+    LineString-only style render Philadelphia's outline instead of a box grid.
+    """
+    n_in = n_out = 0
+    with open(input_path, "r", encoding="utf-8") as fin, \
+         open(output_path, "w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.strip().strip("\x1e")
+            if not line:
+                continue
+            n_in += 1
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            new_props = normalize_boundary(feat.get("properties") or {})
+            if new_props is None:
+                continue
+            for coords in iter_boundary_linestrings(feat.get("geometry")):
+                out_feat = {
+                    "type": "Feature",
+                    "tippecanoe": BOUNDARY_TIPPECANOE,
+                    "properties": new_props,
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                }
+                fout.write("\x1e" + json.dumps(out_feat, separators=(",", ":")) + "\n")
+                n_out += 1
+    print(f"  normalized {n_out} boundary lines from {n_in} features -> {output_path}")
+
+
 def normalize_place(props):
     p = props.get("place")
     if p not in ("city", "town", "suburb", "neighbourhood"):
@@ -334,7 +405,11 @@ LAYERS = [
     {
         "name": "boundary",
         "filter": ["wr/boundary=administrative", "wr/admin_level=4,6,8"],
+        # Geometry-aware path: converts admin area polygons to boundary
+        # LineStrings (see normalize_boundary_geojsonseq). normalize stays for
+        # unit tests / reference; normalize_seq takes precedence in main().
         "normalize": normalize_boundary,
+        "normalize_seq": normalize_boundary_geojsonseq,
     },
     {
         "name": "place",
@@ -512,7 +587,11 @@ def main(argv=None):
         norm_geojson = output_dir / f"{stem}_{name}.geojsonseq"
         filter_layer(str(region_pbf), layer["filter"], str(layer_pbf))
         export_geojsonseq(str(layer_pbf), str(raw_geojson))
-        normalize_geojsonseq(str(raw_geojson), str(norm_geojson), layer["normalize"])
+        normalize_seq = layer.get("normalize_seq")
+        if normalize_seq is not None:
+            normalize_seq(str(raw_geojson), str(norm_geojson))
+        else:
+            normalize_geojsonseq(str(raw_geojson), str(norm_geojson), layer["normalize"])
         layer_files.append((name, str(norm_geojson)))
         intermediates.extend([layer_pbf, raw_geojson, norm_geojson])
 
