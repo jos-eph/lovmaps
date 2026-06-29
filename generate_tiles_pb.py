@@ -314,11 +314,22 @@ ZOOM_FILTERS = {
         ["all", [">=", "$zoom", 10], ["==", "class", "grass"]],
     ],
     "landuse": [">=", "$zoom", 12],
+    # Belt-and-suspenders geometry guard: the boundary GeoJSONSeq is already
+    # LineString-only (normalize_boundary_geojsonseq) and asserted polygon-free
+    # before tiling, so correctness does not depend on $type being honoured by
+    # -j. This guard simply ensures that if a future regression slips a polygon
+    # back into the layer, it still cannot stroke into the per-tile box grid.
+    # NOTE: whether tippecanoe 2.79.0 honours $type in -j is confirmed by the
+    # human smoke test (spec Chunk H), not asserted here.
     "boundary": [
-        "any",
-        ["==", "admin_level", 4],
-        ["all", [">=", "$zoom", 6], ["==", "admin_level", 6]],
-        ["all", [">=", "$zoom", 8], ["==", "admin_level", 8]],
+        "all",
+        ["==", "$type", "LineString"],
+        [
+            "any",
+            ["==", "admin_level", 4],
+            ["all", [">=", "$zoom", 6], ["==", "admin_level", 6]],
+            ["all", [">=", "$zoom", 8], ["==", "admin_level", 8]],
+        ],
     ],
     "place": [
         "any",
