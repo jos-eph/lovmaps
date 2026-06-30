@@ -2,8 +2,11 @@ name: Release tiles
 
 # Dated GitHub Releases CI/CD pipeline for the Philadelphia commute-region
 # .pmtiles / .osm.pbf assets. See CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md (§4.2)
-# for the full specification. This is the single source of truth referenced in
-# §1.1 (SOURCE_PBF_URL) and §3 (decisions D1, D3, D4, D5, D6, D7, D9).
+# for the full specification, and §3 (decisions D1, D3, D4, D5, D6, D7, D9).
+# Source PBFs: Pennsylvania + New Jersey + Delaware state extracts, merged
+# (SOURCE_PA_URL / SOURCE_NJ_URL / SOURCE_DE_URL below) — see SPECS/01_FIXES
+# for why this replaced the original single us-northeast extract (it omits
+# Delaware).
 #
 # Behaviour summary:
 #   * Scheduled daily run at 04:30 UTC (D5).
@@ -36,9 +39,17 @@ concurrency:
   cancel-in-progress: false   # never let a manual run clobber a scheduled run mid-flight
 
 env:
-  # Canonical upstream source — see CI_CD_RELEASE_PLAN.md §1.1.
-  SOURCE_PBF_URL: https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf
-  SOURCE_MD5_URL: https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf.md5
+  # Canonical upstream sources — Pennsylvania + New Jersey + Delaware state
+  # extracts (CI_CD_RELEASE_PLAN.md §1.1, updated per SPECS/01_FIXES). These
+  # are osmium-merged by generate_tiles_pb.py into one region PBF. Delaware
+  # is its own Geofabrik state extract (the old us-northeast source did not
+  # include it, leaving DE streets blank below the bbox's PA/DE border).
+  SOURCE_PA_URL: https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf
+  SOURCE_PA_MD5_URL: https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf.md5
+  SOURCE_NJ_URL: https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf
+  SOURCE_NJ_MD5_URL: https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf.md5
+  SOURCE_DE_URL: https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf
+  SOURCE_DE_MD5_URL: https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf.md5
   # Pinned tippecanoe source release used when the runner has no cached binary.
   TIPPECANOE_VERSION: '2.79.0'
   BASE_NAME: philly_commute_region
@@ -140,46 +151,53 @@ jobs:
             exit 1
           fi
 
-      - name: Download source PBF with retry and md5 verification
-        # Three attempts with exponential backoff (30s, 2m, 8m). The PBF lands
-        # in ${RUNNER_TEMP} — ephemeral runner storage, never the workspace,
-        # never the git tree (plan §4.2 step 5).
-        env:
-          DEST: ${{ runner.temp }}/us-northeast-latest.osm.pbf
-          MD5_DEST: ${{ runner.temp }}/us-northeast-latest.osm.pbf.md5
+      - name: Download source PBFs (PA, NJ, DE) with retry and md5 verification
+        # Three attempts with exponential backoff (30s, 2m, 8m) per source.
+        # Each PBF lands in ${RUNNER_TEMP} — ephemeral runner storage, never
+        # the workspace, never the git tree (plan §4.2 step 5). Three state
+        # extracts replace the old single us-northeast download (see env
+        # block above for why).
         run: |
           set -euo pipefail
-          attempts=3
-          delay=30
-          for i in $(seq 1 "${attempts}"); do
-            echo "Source PBF download attempt ${i}/${attempts}"
-            rm -f "${DEST}" "${DEST}.part" "${MD5_DEST}"
-            if curl -fsSL -o "${DEST}.part" "${SOURCE_PBF_URL}" \
-               && curl -fsSL -o "${MD5_DEST}" "${SOURCE_MD5_URL}"; then
-              mv "${DEST}.part" "${DEST}"
-              expected="$(awk '{print tolower($1)}' "${MD5_DEST}")"
-              actual="$(md5sum "${DEST}" | awk '{print tolower($1)}')"
-              if [ -n "${expected}" ] && [ "${expected}" = "${actual}" ]; then
-                echo "MD5 verified: ${actual}"
-                echo "SOURCE_MD5=${actual}" >> "$GITHUB_ENV"
-                exit 0
+          download_one() {
+            local name="$1" url="$2" md5_url="$3" dest="$4"
+            local attempts=3 delay=30
+            for i in $(seq 1 "${attempts}"); do
+              echo "Source PBF download attempt ${i}/${attempts} (${name})"
+              rm -f "${dest}" "${dest}.part" "${dest}.md5"
+              if curl -fsSL -o "${dest}.part" "${url}" \
+                 && curl -fsSL -o "${dest}.md5" "${md5_url}"; then
+                mv "${dest}.part" "${dest}"
+                expected="$(awk '{print tolower($1)}' "${dest}.md5")"
+                actual="$(md5sum "${dest}" | awk '{print tolower($1)}')"
+                if [ -n "${expected}" ] && [ "${expected}" = "${actual}" ]; then
+                  echo "MD5 verified (${name}): ${actual}"
+                  echo "SOURCE_${name}_MD5=${actual}" >> "$GITHUB_ENV"
+                  return 0
+                fi
+                echo "::warning::MD5 mismatch on attempt ${i} for ${name} (expected '${expected}', got '${actual}')"
+              else
+                echo "::warning::Download failed on attempt ${i} for ${name}"
               fi
-              echo "::warning::MD5 mismatch on attempt ${i} (expected '${expected}', got '${actual}')"
-            else
-              echo "::warning::Download failed on attempt ${i}"
-            fi
-            if [ "${i}" -lt "${attempts}" ]; then
-              echo "Sleeping ${delay}s before retry"
-              sleep "${delay}"
-              delay=$((delay * 4))
-            fi
-          done
-          echo "::error::All ${attempts} download attempts failed; aborting."
-          exit 1
+              if [ "${i}" -lt "${attempts}" ]; then
+                echo "Sleeping ${delay}s before retry"
+                sleep "${delay}"
+                delay=$((delay * 4))
+              fi
+            done
+            echo "::error::All ${attempts} download attempts failed for ${name}; aborting."
+            return 1
+          }
+
+          download_one PA "${SOURCE_PA_URL}" "${SOURCE_PA_MD5_URL}" "${RUNNER_TEMP}/pennsylvania-latest.osm.pbf"
+          download_one NJ "${SOURCE_NJ_URL}" "${SOURCE_NJ_MD5_URL}" "${RUNNER_TEMP}/new-jersey-latest.osm.pbf"
+          download_one DE "${SOURCE_DE_URL}" "${SOURCE_DE_MD5_URL}" "${RUNNER_TEMP}/delaware-latest.osm.pbf"
 
       - name: Generate pmtiles and region PBF
-        # Passing --source-pbf suppresses the script's built-in download path
-        # so the workflow remains the sole owner of network I/O.
+        # Passing --source-pbf (repeated) suppresses the script's built-in
+        # download path so the workflow remains the sole owner of network
+        # I/O. generate_tiles_pb.py bbox-clips each of PA/NJ/DE and
+        # osmium-merges the clips into the single region PBF.
         run: |
           set -euo pipefail
           mkdir -p ./out
@@ -188,7 +206,9 @@ jobs:
             --date "${DATE}" \
             --output-dir ./out \
             --bbox="${BBOX}" \
-            --source-pbf "${RUNNER_TEMP}/us-northeast-latest.osm.pbf"
+            --source-pbf "${RUNNER_TEMP}/pennsylvania-latest.osm.pbf" \
+            --source-pbf "${RUNNER_TEMP}/new-jersey-latest.osm.pbf" \
+            --source-pbf "${RUNNER_TEMP}/delaware-latest.osm.pbf"
 
       - name: Sanity-check outputs
         run: |
@@ -231,8 +251,12 @@ jobs:
             echo "git_sha: ${GITHUB_SHA}"
             echo "git_ref: ${GITHUB_REF}"
             echo "workflow_run_url: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "source_pbf_url: ${SOURCE_PBF_URL}"
-            echo "source_md5: ${SOURCE_MD5:-unknown}"
+            echo "source_pa_url: ${SOURCE_PA_URL}"
+            echo "source_pa_md5: ${SOURCE_PA_MD5:-unknown}"
+            echo "source_nj_url: ${SOURCE_NJ_URL}"
+            echo "source_nj_md5: ${SOURCE_NJ_MD5:-unknown}"
+            echo "source_de_url: ${SOURCE_DE_URL}"
+            echo "source_de_md5: ${SOURCE_DE_MD5:-unknown}"
             echo "bbox: ${BBOX}"
             echo "pmtiles_sha256: ${PMTILES_SHA}"
             echo "osm_pbf_sha256: ${PBF_SHA}"
@@ -267,8 +291,9 @@ jobs:
             echo "Automated tile build."
             echo
             echo "- DATE: ${DATE}"
-            echo "- source: ${SOURCE_PBF_URL}"
-            echo "- source md5: ${SOURCE_MD5:-unknown}"
+            echo "- source PA: ${SOURCE_PA_URL} (md5 ${SOURCE_PA_MD5:-unknown})"
+            echo "- source NJ: ${SOURCE_NJ_URL} (md5 ${SOURCE_NJ_MD5:-unknown})"
+            echo "- source DE: ${SOURCE_DE_URL} (md5 ${SOURCE_DE_MD5:-unknown})"
             echo "- bbox: ${BBOX}"
             echo "- git SHA: ${GITHUB_SHA}"
             echo "- tippecanoe: ${TIPPECANOE_VERSION}"
@@ -327,16 +352,22 @@ jobs:
 
       - name: Prune dated releases beyond the most recent 30
         # D6: keep the most recent 30 dated releases; never prune `current`.
-        # Sort by createdAt (newest first), drop the first 30, delete the rest
-        # along with their tags.
+        # Sort by tagName (newest first), drop the first 30, delete the rest
+        # along with their tags. tagName (tiles-YYYY-MM-DDTHH-MM-SSZ) sorts
+        # lexicographically == chronologically. Do NOT sort by createdAt:
+        # GitHub sets a release's created_at from its target commit, and every
+        # dated release tags the same unchanged main commit, so createdAt is
+        # identical across releases and the tie-broken sort prunes whichever
+        # release `gh release list` happens to put last -- often the one just
+        # created.
         if: steps.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 \
-            --json tagName,createdAt \
-            --jq 'map(select(.tagName | startswith("tiles-"))) | sort_by(.createdAt) | reverse | .[30:] | .[].tagName' \
+            --json tagName \
+            --jq 'map(select(.tagName | startswith("tiles-"))) | sort_by(.tagName) | reverse | .[30:] | .[].tagName' \
             > /tmp/prune.txt
           if [ ! -s /tmp/prune.txt ]; then
             echo "Nothing to prune (have <= 30 dated releases)."
