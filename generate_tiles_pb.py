@@ -362,12 +362,172 @@ def _geometry_area(geometry):
     return 0.0
 
 
-def county_label_point(geometry):
-    """Representative interior label point for a county area, or None.
+def parse_bbox(bbox_str):
+    """Parse 'minlon,minlat,maxlon,maxlat' into a (minlon, minlat, maxlon, maxlat)
+    float tuple, the form clip_ring_to_bbox / label_point_for_geometry expect."""
+    minlon, minlat, maxlon, maxlat = (float(x) for x in bbox_str.split(","))
+    return minlon, minlat, maxlon, maxlat
 
-    Uses the area-weighted centroid of the exterior ring; for a MultiPolygon it
-    picks the largest part. Adequate for county-sized, roughly-convex polygons
-    (a point-on-surface would be the refinement if a label ever lands outside).
+
+def clip_ring_to_bbox(ring, bbox):
+    """Sutherland-Hodgman clip of a closed ring to an axis-aligned bbox.
+
+    [ring] is a closed [[x, y], ...] list (first == last). [bbox] is
+    (minlon, minlat, maxlon, maxlat). Returns the closed ring of the portion
+    of the ring's interior inside the bbox, or [] if nothing survives.
+    Used so an area mostly outside the bbox (e.g. a state) still gets a label
+    point inside its on-screen portion rather than at its full-area centroid.
+    """
+    minx, miny, maxx, maxy = bbox
+    points = ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else list(ring)
+
+    def clip_edge(pts, inside, intersect):
+        if not pts:
+            return []
+        out = []
+        n = len(pts)
+        for i in range(n):
+            curr, prev = pts[i], pts[i - 1]
+            curr_in, prev_in = inside(curr), inside(prev)
+            if curr_in:
+                if not prev_in:
+                    out.append(intersect(prev, curr))
+                out.append(curr)
+            elif prev_in:
+                out.append(intersect(prev, curr))
+        return out
+
+    def intersect_x(value):
+        def fn(p0, p1):
+            x0, y0 = p0
+            x1, y1 = p1
+            t = 0.0 if x1 == x0 else (value - x0) / (x1 - x0)
+            return [value, y0 + t * (y1 - y0)]
+        return fn
+
+    def intersect_y(value):
+        def fn(p0, p1):
+            x0, y0 = p0
+            x1, y1 = p1
+            t = 0.0 if y1 == y0 else (value - y0) / (y1 - y0)
+            return [x0 + t * (x1 - x0), value]
+        return fn
+
+    points = clip_edge(points, lambda p: p[0] >= minx, intersect_x(minx))
+    points = clip_edge(points, lambda p: p[0] <= maxx, intersect_x(maxx))
+    points = clip_edge(points, lambda p: p[1] >= miny, intersect_y(miny))
+    points = clip_edge(points, lambda p: p[1] <= maxy, intersect_y(maxy))
+
+    if not points:
+        return []
+    if points[0] != points[-1]:
+        points.append(points[0])
+    return points
+
+
+def _point_in_ring(point, ring):
+    """Ray-casting point-in-polygon test against a closed ring."""
+    x, y = point
+    n = len(ring) - 1
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if ((yi > y) != (yj > y)) and (
+            x < (xj - xi) * (y - yi) / (yj - yi) + xi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
+
+def point_on_surface(ring):
+    """A point guaranteed to lie inside a (possibly concave) closed ring, or None.
+
+    Tries the cheap case first (the area-weighted centroid, which is already
+    interior for a convex/roughly-convex ring); falls back to a horizontal
+    scanline through the ring's vertical midpoint, taking the widest interior
+    span, which is robust for concave shapes (e.g. a county that wraps around
+    a neighbor) where the raw centroid can fall outside the polygon.
+    """
+    if not ring or len(ring) < 4:
+        return None
+    centroid = _ring_centroid(ring)
+    if _point_in_ring(centroid, ring):
+        return centroid
+
+    ys = [p[1] for p in ring]
+    scan_y = (min(ys) + max(ys)) / 2.0
+    crossings = []
+    n = len(ring) - 1
+    for i in range(n):
+        x0, y0 = ring[i]
+        x1, y1 = ring[i + 1]
+        if y0 == y1:
+            continue
+        if min(y0, y1) <= scan_y < max(y0, y1):
+            t = (scan_y - y0) / (y1 - y0)
+            crossings.append(x0 + t * (x1 - x0))
+    crossings.sort()
+    spans = [
+        (crossings[i + 1] - crossings[i], crossings[i], crossings[i + 1])
+        for i in range(0, len(crossings) - 1, 2)
+    ]
+    if spans:
+        _, x0, x1 = max(spans)
+        return [(x0 + x1) / 2.0, scan_y]
+    return centroid  # last-resort fallback; should not happen for a simple ring
+
+
+def _multiline_coords(geometry):
+    """All vertex chains of a LineString/MultiLineString geometry, or []."""
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "LineString":
+        return [coords] if coords else []
+    if gtype == "MultiLineString":
+        return [line for line in coords if line]
+    return []
+
+
+def _points_in_bbox(points, bbox):
+    minx, miny, maxx, maxy = bbox
+    return [p for p in points if minx <= p[0] <= maxx and miny <= p[1] <= maxy]
+
+
+def _geometry_size(geometry):
+    """Heuristic size for picking the largest among same-named duplicate
+    features: polygon area when available, else vertex count (for an
+    admin area that exported as an incomplete LineString/MultiLineString)."""
+    if not geometry:
+        return 0.0
+    gtype = geometry.get("type")
+    if gtype in ("Polygon", "MultiPolygon"):
+        return _geometry_area(geometry)
+    if gtype in ("LineString", "MultiLineString"):
+        return float(sum(len(line) for line in _multiline_coords(geometry)))
+    return 0.0
+
+
+def label_point_for_geometry(geometry, bbox=None):
+    """Representative interior label point for an admin-area geometry, or None.
+
+    For Polygon/MultiPolygon, clips to [bbox] first (if given) so an area
+    mostly outside the bbox -- a state's full-area centroid can be ~150km
+    off-screen -- gets a label inside its visible portion, then takes a
+    point-on-surface of the largest surviving ring.
+
+    `osmium extract` keeps only nearby boundary ways, so a relation that
+    extends past the bbox may not reassemble into a closed Polygon and can
+    export as an open LineString/MultiLineString instead. Rather than drop
+    the label entirely (the prior behavior), this falls back to the
+    vertex-average of the longest bbox-visible chain -- not a true interior
+    point, but a reasonable position along the visible boundary arc, and
+    strictly better than no label. Which geometry type admin_level 4/6 areas
+    actually export as needs a human smoke check (see SPECS/02_LABELS).
     """
     if not geometry:
         return None
@@ -375,31 +535,54 @@ def county_label_point(geometry):
     coords = geometry.get("coordinates")
     if not coords:
         return None
+
     if gtype == "Polygon":
-        return _ring_centroid(coords[0])
-    if gtype == "MultiPolygon":
-        best_ring = None
-        best_area = -1.0
-        for poly in coords:
-            if not poly:
-                continue
-            area = abs(_ring_signed_area(poly[0]))
-            if area > best_area:
-                best_area = area
-                best_ring = poly[0]
-        return _ring_centroid(best_ring) if best_ring is not None else None
-    return None
+        rings = [coords[0]]
+    elif gtype == "MultiPolygon":
+        rings = [poly[0] for poly in coords if poly]
+    else:
+        rings = None
+
+    if rings is not None:
+        if bbox is not None:
+            rings = [
+                c for r in rings
+                for c in [clip_ring_to_bbox(r, bbox)]
+                if len(c) >= 4
+            ]
+        if not rings:
+            return None
+        best_ring = max(rings, key=lambda r: abs(_ring_signed_area(r)))
+        return point_on_surface(best_ring)
+
+    lines = _multiline_coords(geometry)
+    if not lines:
+        return None
+    if bbox is not None:
+        in_bbox = [pts for line in lines if (pts := _points_in_bbox(line, bbox))]
+        if in_bbox:
+            lines = in_bbox
+    longest = max(lines, key=len)
+    xs = [p[0] for p in longest]
+    ys = [p[1] for p in longest]
+    return [sum(xs) / len(xs), sum(ys) / len(ys)]
 
 
-def iter_county_labels(raw_boundary_path):
+def iter_county_labels(raw_boundary_path, bbox=None):
     """Yield one `place` label Point per named county (admin_level 6).
 
     Reads the RAW boundary export (which still carries `name`; the normalized
     boundary layer drops it). A consolidated city-county such as Philadelphia is
     both admin_level 6 and 8 — selecting level 6 only yields exactly one county
-    label for it. Deduplicated by name, keeping the largest-area geometry.
+    label for it. Deduplicated by name, keeping the largest geometry.
+
+    Accepts Polygon/MultiPolygon *and* LineString/MultiLineString geometry (the
+    latter from a county whose relation didn't reassemble into a closed area
+    after the bbox extract) — every named county overlapping the bbox should
+    get a label, not just the ones that exported cleanly. If [bbox] is given,
+    the label is placed inside the county's bbox-visible portion.
     """
-    best_by_name = {}  # name -> (area, geometry)
+    best_by_name = {}  # name -> (size, geometry)
     with open(raw_boundary_path, "r", encoding="utf-8") as fin:
         for line in fin:
             line = line.strip().strip("\x1e")
@@ -420,14 +603,14 @@ def iter_county_labels(raw_boundary_path):
             if not name:
                 continue
             geom = feat.get("geometry") or {}
-            if geom.get("type") not in ("Polygon", "MultiPolygon"):
+            if geom.get("type") not in ("Polygon", "MultiPolygon", "LineString", "MultiLineString"):
                 continue
-            area = _geometry_area(geom)
+            size = _geometry_size(geom)
             prev = best_by_name.get(name)
-            if prev is None or area > prev[0]:
-                best_by_name[name] = (area, geom)
+            if prev is None or size > prev[0]:
+                best_by_name[name] = (size, geom)
     for name, (_, geom) in best_by_name.items():
-        point = county_label_point(geom)
+        point = label_point_for_geometry(geom, bbox=bbox)
         if point is None:
             continue
         yield {
@@ -438,14 +621,83 @@ def iter_county_labels(raw_boundary_path):
         }
 
 
-def append_county_labels(raw_boundary_path, place_norm_path):
+def append_county_labels(raw_boundary_path, place_norm_path, bbox=None):
     """Append county label features (from the boundary export) to the place layer."""
     n = 0
     with open(place_norm_path, "a", encoding="utf-8") as fout:
-        for feat in iter_county_labels(raw_boundary_path):
+        for feat in iter_county_labels(raw_boundary_path, bbox=bbox):
             fout.write("\x1e" + json.dumps(feat, separators=(",", ":")) + "\n")
             n += 1
     print(f"  appended {n} county labels -> {place_norm_path}")
+
+
+# State name labels. States are admin_level 4 areas; we emit one label Point
+# per whitelisted state into the `place` layer (class == "state"). A state
+# polygon's full-area centroid is routinely far outside the bbox (Pennsylvania's
+# centroid is near Harrisburg, ~150km from the SEPTA bbox), so placement always
+# clips to the bbox first. Whitelisted to {PA, NJ, DE} per 02_LABELS spec §8 so
+# a sliver of an adjoining state (MD, NY) at the bbox edge doesn't also get a
+# label.
+STATE_LABEL_TIPPECANOE = {"minzoom": 6}
+STATE_LABEL_WHITELIST = {"Pennsylvania", "New Jersey", "Delaware"}
+
+
+def iter_state_labels(raw_boundary_path, bbox):
+    """Yield one `place` label Point per whitelisted state (admin_level 4).
+
+    Mirrors iter_county_labels for states: reads the raw boundary export
+    (still carries `name`), restricts to STATE_LABEL_WHITELIST, and places the
+    label inside the bbox-clipped portion of the state via
+    label_point_for_geometry (bbox is required here, not optional, since an
+    unclipped state centroid is never useful for this bbox).
+    """
+    best_by_name = {}  # name -> (size, geometry)
+    with open(raw_boundary_path, "r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip().strip("\x1e")
+            if not line:
+                continue
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            props = feat.get("properties") or {}
+            try:
+                al = int(props.get("admin_level"))
+            except (ValueError, TypeError):
+                continue
+            if al != 4:
+                continue
+            name = props.get("name")
+            if name not in STATE_LABEL_WHITELIST:
+                continue
+            geom = feat.get("geometry") or {}
+            if geom.get("type") not in ("Polygon", "MultiPolygon", "LineString", "MultiLineString"):
+                continue
+            size = _geometry_size(geom)
+            prev = best_by_name.get(name)
+            if prev is None or size > prev[0]:
+                best_by_name[name] = (size, geom)
+    for name, (_, geom) in best_by_name.items():
+        point = label_point_for_geometry(geom, bbox=bbox)
+        if point is None:
+            continue
+        yield {
+            "type": "Feature",
+            "tippecanoe": STATE_LABEL_TIPPECANOE,
+            "properties": {"class": "state", "name": name},
+            "geometry": {"type": "Point", "coordinates": point},
+        }
+
+
+def append_state_labels(raw_boundary_path, place_norm_path, bbox):
+    """Append state label features (from the boundary export) to the place layer."""
+    n = 0
+    with open(place_norm_path, "a", encoding="utf-8") as fout:
+        for feat in iter_state_labels(raw_boundary_path, bbox):
+            fout.write("\x1e" + json.dumps(feat, separators=(",", ":")) + "\n")
+            n += 1
+    print(f"  appended {n} state labels -> {place_norm_path}")
 
 
 def normalize_place(props):
@@ -535,6 +787,7 @@ ZOOM_FILTERS = {
     ],
     "place": [
         "any",
+        ["==", "class", "state"],
         ["==", "class", "city"],
         ["==", "class", "county"],
         ["all", [">=", "$zoom", 6],  ["==", "class", "town"]],
@@ -831,12 +1084,18 @@ def main(argv=None):
         layer_files.append((name, str(norm_geojson)))
         intermediates.extend([layer_pbf, raw_geojson, norm_geojson])
 
-    # County name labels: emit one place label per admin_level 6 area into the
-    # place layer (class == "county"). Derived from the raw boundary export
-    # (still carries name) while intermediates are present, before tiling.
+    # Geographic name labels: emit one place label per admin_level 4/6 area into
+    # the place layer (class == "state" / "county"). Derived from the raw
+    # boundary export (still carries name) while intermediates are present,
+    # before tiling. Both are placed within the bbox-clipped portion of their
+    # area so a label lands on-screen even when the area extends well past the
+    # bbox (see SPECS/02_LABELS).
     if "boundary" in raw_paths and "place" in norm_paths:
+        bbox_tuple = parse_bbox(args.bbox)
         print("\n=== County labels -> place layer ===")
-        append_county_labels(str(raw_paths["boundary"]), str(norm_paths["place"]))
+        append_county_labels(str(raw_paths["boundary"]), str(norm_paths["place"]), bbox=bbox_tuple)
+        print("\n=== State labels -> place layer ===")
+        append_state_labels(str(raw_paths["boundary"]), str(norm_paths["place"]), bbox_tuple)
 
     generate_pmtiles(layer_files, str(final_pmtiles))
 

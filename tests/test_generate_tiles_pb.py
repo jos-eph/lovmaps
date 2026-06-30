@@ -150,10 +150,79 @@ class AssertBoundaryLinesOnly(unittest.TestCase):
             self._run([_feature({"type": "LineString", "coordinates": [[0, 0], [1, 1]]}, admin_level=True)])
 
 
+class ClipRingToBbox(unittest.TestCase):
+    def test_clips_square_to_overlapping_bbox(self):
+        # SQUARE is [0,0]-[10,10]; bbox keeps only the right half.
+        clipped = g.clip_ring_to_bbox(SQUARE, (5, -5, 20, 20))
+        xs = [p[0] for p in clipped]
+        self.assertTrue(all(x >= 5 - 1e-9 for x in xs), clipped)
+        self.assertTrue(any(x > 5 for x in xs), clipped)
+        self.assertEqual(clipped[0], clipped[-1])  # stays closed
+
+    def test_ring_entirely_outside_bbox_yields_empty(self):
+        clipped = g.clip_ring_to_bbox(SQUARE, (100, 100, 200, 200))
+        self.assertEqual(clipped, [])
+
+    def test_ring_entirely_inside_bbox_is_unchanged_as_a_set(self):
+        clipped = g.clip_ring_to_bbox(SQUARE, (-100, -100, 100, 100))
+        self.assertEqual(set(map(tuple, clipped)), set(map(tuple, SQUARE)))
+
+
+class PointOnSurface(unittest.TestCase):
+    def test_convex_ring_uses_centroid(self):
+        pt = g.point_on_surface(SQUARE)
+        self.assertTrue(0 < pt[0] < 10 and 0 < pt[1] < 10, pt)
+
+    def test_concave_ring_yields_a_truly_interior_point(self):
+        # An L-shaped (concave) ring whose area-weighted centroid falls in the
+        # notch, outside the polygon -- mirrors Montgomery Co. wrapping NW of
+        # Philadelphia. point_on_surface must not just return that centroid.
+        l_shape = [
+            [0, 0], [10, 0], [10, 2], [2, 2], [2, 10], [0, 10], [0, 0],
+        ]
+        centroid = g._ring_centroid(l_shape)
+        self.assertFalse(g._point_in_ring(centroid, l_shape),
+                          "fixture invalid: centroid should fall outside the L")
+        pt = g.point_on_surface(l_shape)
+        self.assertTrue(g._point_in_ring(pt, l_shape),
+                         f"point_on_surface returned an exterior point: {pt}")
+
+
 class CountyLabels(unittest.TestCase):
     def test_centroid_inside_square(self):
-        pt = g.county_label_point({"type": "Polygon", "coordinates": [SQUARE]})
+        pt = g.label_point_for_geometry({"type": "Polygon", "coordinates": [SQUARE]})
         self.assertTrue(0 < pt[0] < 10 and 0 < pt[1] < 10, pt)
+
+    def test_clips_to_bbox_when_county_mostly_outside_it(self):
+        # A county whose full extent is [0,0]-[10,10] but the bbox only shows
+        # its right edge: the label must land in the visible slice, not at the
+        # full-shape centroid (which would be off-screen).
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Edge County"),
+        ])
+        try:
+            labels = list(g.iter_county_labels(path, bbox=(8, -5, 20, 20)))
+        finally:
+            os.remove(path)
+        self.assertEqual(len(labels), 1)
+        x, y = labels[0]["geometry"]["coordinates"]
+        self.assertGreaterEqual(x, 8)
+
+    def test_open_linestring_geometry_still_yields_a_label(self):
+        # Simulates a county relation that didn't reassemble into a closed
+        # Polygon after the bbox extract (spec §2.2(2)) -- must not be
+        # silently dropped.
+        path = _write_geojsonseq([
+            _feature({"type": "LineString", "coordinates": [[1, 1], [2, 2], [3, 3]]},
+                     admin_level="6", name="Clipped County"),
+        ])
+        try:
+            labels = list(g.iter_county_labels(path))
+        finally:
+            os.remove(path)
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(labels[0]["properties"]["name"], "Clipped County")
 
     def test_one_label_per_named_county(self):
         path = _write_geojsonseq([
@@ -194,6 +263,84 @@ class CountyLabels(unittest.TestCase):
             self.assertEqual(list(g.iter_county_labels(path)), [])
         finally:
             os.remove(path)
+
+
+# A state-sized polygon: [0,0]-[100,100], whose full-area centroid (50, 50) is
+# far outside the small bbox window the tests below clip it to -- mirroring
+# Pennsylvania's centroid landing near Harrisburg, ~150km from the SEPTA bbox.
+STATE_LIKE = [[0, 0], [100, 0], [100, 100], [0, 100], [0, 0]]
+STATE_BBOX = (40, 40, 60, 60)
+
+
+class StateLabels(unittest.TestCase):
+    def test_whitelisted_state_label_lands_inside_the_bbox(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="Pennsylvania"),
+        ])
+        try:
+            labels = list(g.iter_state_labels(path, STATE_BBOX))
+        finally:
+            os.remove(path)
+        self.assertEqual(len(labels), 1)
+        lab = labels[0]
+        self.assertEqual(lab["properties"], {"class": "state", "name": "Pennsylvania"})
+        self.assertEqual(lab["tippecanoe"], {"minzoom": 6})
+        x, y = lab["geometry"]["coordinates"]
+        self.assertTrue(40 <= x <= 60 and 40 <= y <= 60,
+                         f"label {x, y} not inside bbox {STATE_BBOX}")
+
+    def test_non_whitelisted_state_is_skipped(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="Maryland"),
+        ])
+        try:
+            labels = list(g.iter_state_labels(path, STATE_BBOX))
+        finally:
+            os.remove(path)
+        self.assertEqual(labels, [])
+
+    def test_county_level_feature_is_not_mistaken_for_a_state(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="6", name="Pennsylvania"),  # wrong level
+        ])
+        try:
+            labels = list(g.iter_state_labels(path, STATE_BBOX))
+        finally:
+            os.remove(path)
+        self.assertEqual(labels, [])
+
+    def test_all_three_whitelisted_states_can_be_emitted(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name="Pennsylvania"),
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name="New Jersey"),
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name="Delaware"),
+        ])
+        try:
+            names = {lab["properties"]["name"] for lab in g.iter_state_labels(path, STATE_BBOX)}
+        finally:
+            os.remove(path)
+        self.assertEqual(names, {"Pennsylvania", "New Jersey", "Delaware"})
+
+    def test_append_state_labels_writes_class_state_features(self):
+        raw_path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="New Jersey"),
+        ])
+        place_path = raw_path + ".place"
+        with open(place_path, "w", encoding="utf-8") as f:
+            pass
+        try:
+            g.append_state_labels(raw_path, place_path, STATE_BBOX)
+            features = _read_geojsonseq(place_path)
+        finally:
+            os.remove(raw_path)
+            if os.path.exists(place_path):
+                os.remove(place_path)
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0]["properties"]["class"], "state")
 
 
 class MergeDedupesSharedBoundaryWay(unittest.TestCase):
@@ -286,6 +433,16 @@ class MergeDedupesSharedBoundaryWay(unittest.TestCase):
         shared_coords = [[0, 0], [1, 1], [2, 2]]
         matches = [f for f in out if f["geometry"]["coordinates"] == shared_coords]
         self.assertEqual(len(matches), 2, "without dedup the shared way is duplicated")
+
+
+class PlaceZoomFilterIncludesState(unittest.TestCase):
+    def test_state_class_branch_present(self):
+        # Regression guard: tippecanoe's -j feature-filter only keeps `place`
+        # features matching one of these branches, so a "state" place feature
+        # emitted by append_state_labels would be silently dropped at tiling
+        # if this filter weren't updated alongside it (spec 02_LABELS Issue A).
+        place_filter = g.ZOOM_FILTERS["place"]
+        self.assertIn(["==", "class", "state"], place_filter)
 
 
 if __name__ == "__main__":
