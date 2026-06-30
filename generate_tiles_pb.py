@@ -15,20 +15,30 @@ Output pmtiles will have these source-layers, matching style.json:
 
 CLI:
   python generate_tiles_pb.py
-      [--source-pbf PATH] [--source-url URL]
+      [--source-pbf PATH [--source-pbf PATH ...]] [--source-url URL]
       [--bbox MINLON,MINLAT,MAXLON,MAXLAT]
       [--base-name NAME] [--date STR]
       [--output-dir DIR]
       [--keep-intermediates | --no-keep-intermediates]
 
 Source PBF handling:
-  - If --source-pbf is given, the script uses it directly and performs no
-    network I/O. This is the path used by the CI workflow, which owns
-    download / retry / md5 verification.
+  - --source-pbf is repeatable. If given, the script uses the path(s)
+    directly and performs no network I/O. This is the path used by the CI
+    workflow, which owns download / retry / md5 verification.
+      - One --source-pbf: bbox-extracted straight to the region PBF
+        (back-compatible with the original single-source behavior).
+      - Multiple --source-pbf: each is bbox-extracted to its own clip, then
+        the clips are combined with `osmium merge` into the region PBF.
+        `osmium merge` dedupes objects sharing identical (type, id,
+        version), so shared border ways/nodes between adjoining state
+        extracts collapse to one copy. CI passes PA + NJ + DE this way
+        (see release-tiles.yml) so Delaware is covered; see SOURCE_PBF_URL
+        below for why a single Geofabrik regional extract is no longer the
+        canonical CI source.
   - If --source-pbf is omitted, the script downloads --source-url
-    (default: the Geofabrik us-northeast extract) into --output-dir as a
-    convenience for local runs. The downloaded source PBF is treated as
-    an intermediate and removed on clean exit unless --keep-intermediates.
+    into --output-dir as a single-source convenience for local runs. The
+    downloaded source PBF is treated as an intermediate and removed on
+    clean exit unless --keep-intermediates.
 
 Final outputs (always emitted):
   <output-dir>/<base-name>_<date>.osm.pbf   (bbox-extracted region)
@@ -51,9 +61,15 @@ from pathlib import Path
 #### DEBUG
 print(f"Arguments sent to generate_tiles_pb, {sys.argv = }")
 ###
-# Canonical upstream source — single source of truth. See
-# CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md §1.1. Any change here is an
-# explicit, reviewed decision.
+# Local-convenience default only (used when --source-pbf/--source-url are
+# both omitted). NOT the canonical CI source: us-northeast does not contain
+# Delaware (a separate Geofabrik us-south extract), which left a swath of DE
+# with no street data. CI (release-tiles.yml) instead downloads the
+# Pennsylvania + New Jersey + Delaware state extracts and passes all three
+# via repeated --source-pbf, which this script bbox-clips and `osmium merge`s
+# (see "Source PBF handling" above). See CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md
+# §1.1 for the original single-source decision and SPECS/01_FIXES for the
+# PA+NJ+DE follow-up.
 SOURCE_PBF_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf"
 SOURCE_MD5_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf.md5"
 
@@ -86,6 +102,17 @@ def run(cmd):
 def extract_region(input_pbf, bbox, output_pbf):
     print(f"\n=== Stage 1: extract region -> {output_pbf} ===")
     run(["osmium", "extract", "--bbox", bbox, input_pbf, "--output", output_pbf])
+
+
+def merge_regions(clips, output_pbf):
+    """Combine bbox-clipped source PBFs into one region PBF.
+
+    `osmium merge` dedupes objects with identical (type, id, version), so
+    shared border ways/nodes between adjoining state extracts (e.g. the
+    PA/NJ river boundary) collapse to a single copy rather than duplicating.
+    """
+    print(f"\n=== Stage 1: merge {len(clips)} clipped sources -> {output_pbf} ===")
+    run(["osmium", "merge", *clips, "-o", output_pbf])
 
 
 # ---------- Stage 2: per-layer tag filter ----------
@@ -680,17 +707,21 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--source-pbf",
+        action="append",
         default=None,
         help=(
-            "Path to a local OSM .pbf to use as input. If omitted, the script "
-            "downloads --source-url into --output-dir. Pass this flag in CI; "
-            "passing it suppresses all network I/O."
+            "Path to a local OSM .pbf to use as input. Repeatable: pass it "
+            "more than once to bbox-clip each source and `osmium merge` the "
+            "clips into the region PBF (e.g. one per state extract). If "
+            "omitted entirely, the script downloads --source-url into "
+            "--output-dir. Pass this flag in CI; passing it suppresses all "
+            "network I/O."
         ),
     )
     p.add_argument(
         "--source-url",
         default=SOURCE_PBF_URL,
-        help="URL to download when --source-pbf is not given.",
+        help="Single-source URL to download when --source-pbf is not given.",
     )
     p.add_argument(
         "--bbox",
@@ -746,25 +777,36 @@ def main(argv=None):
 
     intermediates = []
 
-    # Resolve source PBF (provided locally, or downloaded as a convenience).
+    # Resolve source PBF(s) (provided locally, or downloaded as a convenience).
     if args.source_pbf:
-        source_pbf = Path(args.source_pbf)
-        if not source_pbf.exists():
-            print(f"Error: --source-pbf '{source_pbf}' does not exist.")
-            sys.exit(1)
+        source_pbfs = [Path(p) for p in args.source_pbf]
+        for source_pbf in source_pbfs:
+            if not source_pbf.exists():
+                print(f"Error: --source-pbf '{source_pbf}' does not exist.")
+                sys.exit(1)
         downloaded_source = False
     else:
-        source_pbf = output_dir / "us-northeast-latest.osm.pbf"
-        if source_pbf.exists():
-            print(f"[INFO] reusing existing source PBF at {source_pbf}")
+        single_source = output_dir / "us-northeast-latest.osm.pbf"
+        if single_source.exists():
+            print(f"[INFO] reusing existing source PBF at {single_source}")
         else:
-            download_source_pbf(args.source_url, SOURCE_MD5_URL, str(source_pbf))
+            download_source_pbf(args.source_url, SOURCE_MD5_URL, str(single_source))
+        source_pbfs = [single_source]
         downloaded_source = True
-        intermediates.append(source_pbf)
+        intermediates.append(single_source)
 
     print(f"Pipeline output: {final_pmtiles}")
 
-    extract_region(str(source_pbf), args.bbox, str(region_pbf))
+    if len(source_pbfs) == 1:
+        extract_region(str(source_pbfs[0]), args.bbox, str(region_pbf))
+    else:
+        clips = []
+        for i, source_pbf in enumerate(source_pbfs):
+            clip_pbf = output_dir / f"{stem}_clip{i}.osm.pbf"
+            extract_region(str(source_pbf), args.bbox, str(clip_pbf))
+            clips.append(str(clip_pbf))
+            intermediates.append(clip_pbf)
+        merge_regions(clips, str(region_pbf))
 
     layer_files = []
     raw_paths = {}
@@ -810,7 +852,7 @@ def main(argv=None):
                 print(f"  [WARN] could not remove {path}: {e}")
     else:
         if downloaded_source:
-            print(f"[INFO] keeping downloaded source PBF: {source_pbf}")
+            print(f"[INFO] keeping downloaded source PBF(s): {source_pbfs}")
         print("[INFO] keeping per-layer intermediates")
 
     print(f"\nDone:")
