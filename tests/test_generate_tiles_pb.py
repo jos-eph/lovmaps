@@ -196,5 +196,97 @@ class CountyLabels(unittest.TestCase):
             os.remove(path)
 
 
+class MergeDedupesSharedBoundaryWay(unittest.TestCase):
+    """Chunk 3C: a way shared between two clipped sources (e.g. the PA/NJ
+    river boundary, present in both the PA clip and the NJ clip) must end up
+    as exactly one boundary line, not two.
+
+    `osmium merge` (Chunk 3A's merge_regions(), see its docstring) dedupes
+    objects with identical (type, id, version) at the PBF level, before
+    export/normalize ever run -- so it can't be exercised here without a
+    real osmium binary (that's Chunk 3D, the human smoke test). This test
+    instead simulates merge's documented identity-based dedup in pure
+    Python on synthetic "raw export" features, then runs the real
+    production normalizer (normalize_boundary_geojsonseq) on the result, to
+    confirm the rest of the pipeline doesn't reintroduce a duplicate.
+    """
+
+    @staticmethod
+    def _dedupe_by_osm_identity(features):
+        """Stand-in for `osmium merge`: keep one copy per (type, id, version)."""
+        seen = set()
+        out = []
+        for feat in features:
+            props = feat["properties"]
+            key = (props["@type"], props["@id"], props["@version"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(feat)
+        return out
+
+    @staticmethod
+    def _shared_way():
+        # The PA/NJ river boundary way: identical id/version/geometry as
+        # exported independently by both the PA clip and the NJ clip.
+        return _feature(
+            {"type": "LineString", "coordinates": [[0, 0], [1, 1], [2, 2]]},
+            admin_level="6", **{"@type": "way", "@id": 100, "@version": 3},
+        )
+
+    @staticmethod
+    def _pa_only_way():
+        return _feature(
+            {"type": "LineString", "coordinates": [[5, 5], [6, 6]]},
+            admin_level="6", **{"@type": "way", "@id": 101, "@version": 1},
+        )
+
+    @staticmethod
+    def _nj_only_way():
+        return _feature(
+            {"type": "LineString", "coordinates": [[7, 7], [8, 8]]},
+            admin_level="6", **{"@type": "way", "@id": 102, "@version": 1},
+        )
+
+    def _normalize(self, features):
+        raw_path = _write_geojsonseq(features)
+        norm_path = raw_path + ".norm"
+        try:
+            g.normalize_boundary_geojsonseq(raw_path, norm_path)
+            return _read_geojsonseq(norm_path)
+        finally:
+            os.remove(raw_path)
+            if os.path.exists(norm_path):
+                os.remove(norm_path)
+
+    def test_dedup_then_normalize_yields_one_line_for_shared_way(self):
+        clip_a = [self._shared_way(), self._pa_only_way()]
+        clip_b = [self._shared_way(), self._nj_only_way()]
+
+        merged = self._dedupe_by_osm_identity(clip_a + clip_b)
+        self.assertEqual(len(merged), 3, "shared way should collapse to one copy")
+
+        out = self._normalize(merged)
+        self.assertEqual(len(out), 3)
+        shared_coords = [[0, 0], [1, 1], [2, 2]]
+        matches = [f for f in out if f["geometry"]["coordinates"] == shared_coords]
+        self.assertEqual(len(matches), 1, "shared way must produce exactly one boundary line")
+
+    def test_without_dedup_shared_way_duplicates(self):
+        # Negative control: naively concatenating both clips' raw exports
+        # without the merge/dedup step does duplicate the shared way's
+        # line -- demonstrating why merge_regions()/osmium merge is needed,
+        # and that the dedup step above is doing real work.
+        clip_a = [self._shared_way(), self._pa_only_way()]
+        clip_b = [self._shared_way(), self._nj_only_way()]
+        naive = clip_a + clip_b
+
+        out = self._normalize(naive)
+        self.assertEqual(len(out), 4)
+        shared_coords = [[0, 0], [1, 1], [2, 2]]
+        matches = [f for f in out if f["geometry"]["coordinates"] == shared_coords]
+        self.assertEqual(len(matches), 2, "without dedup the shared way is duplicated")
+
+
 if __name__ == "__main__":
     unittest.main()
