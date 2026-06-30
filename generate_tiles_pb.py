@@ -782,7 +782,7 @@ ZOOM_FILTERS = {
             "any",
             ["==", "admin_level", 4],
             ["all", [">=", "$zoom", 6], ["==", "admin_level", 6]],
-            ["all", [">=", "$zoom", 8], ["==", "admin_level", 8]],
+            ["all", [">=", "$zoom", 13], ["==", "admin_level", 8]],
         ],
     ],
     "place": [
@@ -819,7 +819,7 @@ def generate_pmtiles(layer_files, output_pmtiles, min_zoom="10", max_zoom="13"):
         "--coalesce",
         "--simplify-only-low-zooms",
         "--detect-shared-borders",
-        "--maximum-tile-bytes=200000",
+        "--maximum-tile-bytes=500000",
         "-j", json.dumps(ZOOM_FILTERS),
     ]
     for layer_name, path in layer_files:

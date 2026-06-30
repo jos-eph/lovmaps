@@ -445,5 +445,46 @@ class PlaceZoomFilterIncludesState(unittest.TestCase):
         self.assertIn(["==", "class", "state"], place_filter)
 
 
+class BoundaryZoomFilterGatesAdminLevel8(unittest.TestCase):
+    # 03_Still_cant_see_counties Chunk 1B: admin_level==8 is every PA
+    # municipality (hundreds), not just "cities" -- it must not be encoded
+    # into tiles below z13, or the regional (z10-12) view is a purple web and
+    # the dense z10 tile risks evicting the sparse county/state label points.
+    def test_admin_8_gated_to_zoom_13(self):
+        any_branches = g.ZOOM_FILTERS["boundary"][2]
+        self.assertIn(["all", [">=", "$zoom", 13], ["==", "admin_level", 8]],
+                      any_branches)
+        self.assertNotIn(["all", [">=", "$zoom", 8], ["==", "admin_level", 8]],
+                         any_branches)
+
+    def test_admin_4_and_6_gates_unchanged(self):
+        # Regression guard: only the admin_8 (municipal) gate moves; state
+        # stays ungated and county stays gated at its existing zoom>=6.
+        any_branches = g.ZOOM_FILTERS["boundary"][2]
+        self.assertIn(["==", "admin_level", 4], any_branches)
+        self.assertIn(["all", [">=", "$zoom", 6], ["==", "admin_level", 6]],
+                      any_branches)
+
+
+class GeneratePmtilesTileByteBudget(unittest.TestCase):
+    # 03_Still_cant_see_counties Chunk 2A: belt-and-suspenders headroom for
+    # the label points sharing the densest (z10) tile with the road network.
+    def test_maximum_tile_bytes_is_500000(self):
+        captured = {}
+
+        def fake_run(cmd):
+            captured["cmd"] = cmd
+
+        orig_run = g.run
+        g.run = fake_run
+        try:
+            g.generate_pmtiles([("layer", "/dev/null")], "/tmp/out.pmtiles")
+        finally:
+            g.run = orig_run
+
+        self.assertIn("--maximum-tile-bytes=500000", captured["cmd"])
+        self.assertNotIn("--maximum-tile-bytes=200000", captured["cmd"])
+
+
 if __name__ == "__main__":
     unittest.main()
