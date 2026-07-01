@@ -101,7 +101,7 @@ def run(cmd):
 
 def extract_region(input_pbf, bbox, output_pbf):
     print(f"\n=== Stage 1: extract region -> {output_pbf} ===")
-    run(["osmium", "extract", "--bbox", bbox, input_pbf, "--output", output_pbf, "--strategy","smart"])
+    run(["osmium", "extract", "--bbox", bbox, "--strategy","smart", input_pbf, "--output", output_pbf])
 
 
 def merge_regions(clips, output_pbf):
