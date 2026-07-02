@@ -687,5 +687,76 @@ class LabelManifestEnforcement(unittest.TestCase):
         self.assertIn("manifest OK", out.getvalue())
 
 
+class CountyLabelDedupeKey(unittest.TestCase):
+    # 06 impl spec Chunk L4 / hazards H3-H5: dedupe by `name` alone collapses
+    # same-name counties in different states (Mercer PA + Mercer NJ, in one
+    # merged region) into a single label, and lets any future named duplicate
+    # polygon win by size. Dedupe key is the first available of
+    # wikidata -> nist:fips_code -> name; a data-poor county with neither
+    # optional field must still get a label (never require optional fields).
+
+    def _labels_for(self, features):
+        path = _write_geojsonseq(features)
+        try:
+            return list(g.iter_county_labels(path))
+        finally:
+            os.remove(path)
+
+    def test_same_name_different_wikidata_yields_two_labels(self):
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Mercer County", wikidata="Q495687"),
+            _feature({"type": "Polygon", "coordinates": [SQUARE2]},
+                     admin_level="6", name="Mercer County", wikidata="Q138464"),
+        ])
+        self.assertEqual(len(labels), 2)
+        self.assertEqual({lab["properties"]["name"] for lab in labels},
+                         {"Mercer County"})
+
+    def test_same_wikidata_fragments_merge_keeping_larger(self):
+        # One county split into two exported fragments (same wikidata):
+        # exactly one label, placed within the larger fragment.
+        small = [[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [small]},
+                     admin_level="6", name="Sussex County", wikidata="Q156213"),
+            _feature({"type": "Polygon", "coordinates": [SQUARE2]},
+                     admin_level="6", name="Sussex County", wikidata="Q156213"),
+        ])
+        self.assertEqual(len(labels), 1)
+        x, y = labels[0]["geometry"]["coordinates"]
+        self.assertTrue(20 < x < 30 and 20 < y < 30, (x, y))
+
+    def test_fips_key_used_when_wikidata_absent(self):
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Cumberland County",
+                     **{"nist:fips_code": "42041"}),
+            _feature({"type": "Polygon", "coordinates": [SQUARE2]},
+                     admin_level="6", name="Cumberland County",
+                     **{"nist:fips_code": "34011"}),
+        ])
+        self.assertEqual(len(labels), 2)
+
+    def test_name_only_county_still_emitted(self):
+        # Lycoming-style data poverty (no wikidata, no fips) -- the dedupe
+        # upgrade must never drop it.
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Lycoming County"),
+        ])
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(labels[0]["properties"]["name"], "Lycoming County")
+
+    def test_nameless_feature_still_skipped_even_with_wikidata(self):
+        # The unnamed duplicate Sussex polygon (hazard H3): has wikidata but
+        # no label text -> no label, and no crash.
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", wikidata="Q156213"),
+        ])
+        self.assertEqual(labels, [])
+
+
 if __name__ == "__main__":
     unittest.main()

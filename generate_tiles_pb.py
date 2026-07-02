@@ -586,7 +586,14 @@ def iter_county_labels(raw_boundary_path, bbox=None):
     Reads the RAW boundary export (which still carries `name`; the normalized
     boundary layer drops it). A consolidated city-county such as Philadelphia is
     both admin_level 6 and 8 — selecting level 6 only yields exactly one county
-    label for it. Deduplicated by name, keeping the largest geometry.
+    label for it.
+
+    Deduplicated by the first available of wikidata -> nist:fips_code -> name,
+    keeping the largest geometry. Name alone is ambiguous in a merged
+    multi-state region (Mercer County exists in both PA and NJ) and both
+    optional keys are genuinely absent from some real counties (Lycoming PA
+    has no fips), so the ladder never *requires* either — a data-poor county
+    still labels, keyed by name.
 
     Accepts Polygon/MultiPolygon *and* LineString/MultiLineString geometry (the
     latter from a county whose relation didn't reassemble into a closed area
@@ -594,7 +601,7 @@ def iter_county_labels(raw_boundary_path, bbox=None):
     get a label, not just the ones that exported cleanly. If [bbox] is given,
     the label is placed inside the county's bbox-visible portion.
     """
-    best_by_name = {}  # name -> (size, geometry)
+    best_by_key = {}  # wikidata|fips|name -> (size, name, geometry)
     with open(raw_boundary_path, "r", encoding="utf-8") as fin:
         for line in fin:
             line = line.strip().strip("\x1e")
@@ -618,10 +625,11 @@ def iter_county_labels(raw_boundary_path, bbox=None):
             if geom.get("type") not in ("Polygon", "MultiPolygon", "LineString", "MultiLineString"):
                 continue
             size = _geometry_size(geom)
-            prev = best_by_name.get(name)
+            key = props.get("wikidata") or props.get("nist:fips_code") or name
+            prev = best_by_key.get(key)
             if prev is None or size > prev[0]:
-                best_by_name[name] = (size, geom)
-    for name, (_, geom) in best_by_name.items():
+                best_by_key[key] = (size, name, geom)
+    for _, name, geom in best_by_key.values():
         point = label_point_for_geometry(geom, bbox=bbox)
         if point is None:
             continue
