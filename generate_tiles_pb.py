@@ -130,7 +130,13 @@ def filter_layer(input_pbf, filters, output_pbf):
 # ---------- Stage 3: per-layer GeoJSONSeq export ----------
 
 def export_geojsonseq(input_pbf, output_geojsonseq):
-    run(["osmium", "export", input_pbf, "-f", "geojsonseq", "-o", output_geojsonseq])
+    # --show-errors: by default osmium export silently ignores geometries it
+    # cannot build, so a boundary relation whose ring doesn't close vanishes
+    # without a trace. This prints one stderr line per failed object (run()
+    # inherits stderr, so it lands in the CI log). Deliberately NOT
+    # --stop-on-error: the label manifest check is the failure gate.
+    run(["osmium", "export", input_pbf, "--show-errors",
+         "-f", "geojsonseq", "-o", output_geojsonseq])
 
 
 # ---------- Stage 4: normalize OSM tags -> OpenMapTiles props ----------

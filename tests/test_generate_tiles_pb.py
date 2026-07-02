@@ -528,5 +528,42 @@ class ExtractRegionCompletesBoundaryRelations(unittest.TestCase):
         self.assertEqual(cmd[m + 1], "out.pbf")
 
 
+class ExportShowsAssemblyErrors(unittest.TestCase):
+    # 06 impl spec Chunk L2: by default `osmium export` SILENTLY ignores
+    # geometries it cannot build -- a county whose ring doesn't close just
+    # vanishes from the output (Delaware County, relation 417846). With
+    # --show-errors each failure becomes a stderr line naming the object,
+    # which reaches the CI log because run() inherits stderr. No
+    # --stop-on-error: one bad POI polygon must not kill the build; the
+    # label manifest (Chunk L3), not raw error text, is the failure gate.
+    def _captured_cmd(self):
+        captured = {}
+
+        def fake_run(cmd):
+            captured["cmd"] = cmd
+
+        orig_run = g.run
+        g.run = fake_run
+        try:
+            g.export_geojsonseq("in.pbf", "out.geojsonseq")
+        finally:
+            g.run = orig_run
+        return captured["cmd"]
+
+    def test_export_shows_errors(self):
+        cmd = self._captured_cmd()
+        self.assertIn("--show-errors", cmd)
+        self.assertNotIn("--stop-on-error", cmd)
+
+    def test_export_format_and_output_args_unchanged(self):
+        cmd = self._captured_cmd()
+        self.assertEqual(cmd[:2], ["osmium", "export"])
+        self.assertIn("in.pbf", cmd)
+        i = cmd.index("-f")
+        self.assertEqual(cmd[i + 1], "geojsonseq")
+        j = cmd.index("-o")
+        self.assertEqual(cmd[j + 1], "out.geojsonseq")
+
+
 if __name__ == "__main__":
     unittest.main()
