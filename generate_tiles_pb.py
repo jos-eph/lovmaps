@@ -628,15 +628,22 @@ def iter_county_labels(raw_boundary_path, bbox=None):
             key = props.get("wikidata") or props.get("nist:fips_code") or name
             prev = best_by_key.get(key)
             if prev is None or size > prev[0]:
-                best_by_key[key] = (size, name, geom)
-    for _, name, geom in best_by_key.values():
+                # wikidata/fips ride along onto the label (when present) so a
+                # future gap can be diagnosed from the tile archive itself.
+                out_props = {"class": "county", "name": name}
+                if props.get("wikidata"):
+                    out_props["wikidata"] = props["wikidata"]
+                if props.get("nist:fips_code"):
+                    out_props["fips"] = props["nist:fips_code"]
+                best_by_key[key] = (size, out_props, geom)
+    for _, out_props, geom in best_by_key.values():
         point = label_point_for_geometry(geom, bbox=bbox)
         if point is None:
             continue
         yield {
             "type": "Feature",
             "tippecanoe": COUNTY_LABEL_TIPPECANOE,
-            "properties": {"class": "county", "name": name},
+            "properties": out_props,
             "geometry": {"type": "Point", "coordinates": point},
         }
 

@@ -758,5 +758,54 @@ class CountyLabelDedupeKey(unittest.TestCase):
         self.assertEqual(labels, [])
 
 
+class CountyLabelDebugProps(unittest.TestCase):
+    # 06 impl spec Chunk L5 (optional): carry wikidata/fips onto the county
+    # label so the NEXT silent gap can be diagnosed from the tile archive
+    # itself. Keys are omitted (not null) when the source lacks them --
+    # test_one_label_per_named_county already pins the bare-props case.
+
+    def _labels_for(self, features):
+        path = _write_geojsonseq(features)
+        try:
+            return list(g.iter_county_labels(path))
+        finally:
+            os.remove(path)
+
+    def test_county_label_carries_wikidata_and_fips_when_present(self):
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Delaware County",
+                     wikidata="Q27844", **{"nist:fips_code": "42045"}),
+        ])
+        self.assertEqual(len(labels), 1)
+        props = labels[0]["properties"]
+        self.assertEqual(props["wikidata"], "Q27844")
+        self.assertEqual(props["fips"], "42045")
+
+    def test_absent_keys_are_omitted_not_null(self):
+        labels = self._labels_for([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Lycoming County",
+                     wikidata="Q156334"),
+        ])
+        props = labels[0]["properties"]
+        self.assertEqual(props["wikidata"], "Q156334")
+        self.assertNotIn("fips", props)
+
+    def test_state_labels_unchanged(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="Delaware",
+                     wikidata="Q1393", **{"ref:fips": "10"}),
+        ])
+        try:
+            labels = list(g.iter_state_labels(path, STATE_BBOX))
+        finally:
+            os.remove(path)
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(labels[0]["properties"],
+                         {"class": "state", "name": "Delaware"})
+
+
 if __name__ == "__main__":
     unittest.main()
