@@ -69,6 +69,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Run unit tests
+        # Stdlib-only suite (no osmium/tippecanoe/network needed), so it runs
+        # before the expensive toolchain setup and fails the job fast. See
+        # fixmaps SPECS/06_COUNTY_BORDER_PATTERNS impl spec, Chunk L0.
+        run: python -m unittest discover -s tests -v
+
       - name: Install osmium-tool
         # osmium-tool is in the Ubuntu apt repo; tippecanoe is not (it's a Felt
         # project distributed only as source). We install osmium directly and
