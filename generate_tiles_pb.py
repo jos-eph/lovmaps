@@ -100,8 +100,14 @@ def run(cmd):
 # ---------- Stage 1: bbox extract ----------
 
 def extract_region(input_pbf, bbox, output_pbf):
+    # --strategy smart keeps relation member ways that fall outside the bbox,
+    # but only for type=multipolygon by default; admin boundaries are
+    # type=boundary, so without -S types=any a cross-bbox state/county ring
+    # loses members and osmium export silently emits nothing for it.
     print(f"\n=== Stage 1: extract region -> {output_pbf} ===")
-    run(["osmium", "extract", "--bbox", bbox, "--strategy","smart", "--output", output_pbf, input_pbf])
+    run(["osmium", "extract", "--bbox", bbox,
+         "--strategy", "smart", "-S", "types=any",
+         "--output", output_pbf, input_pbf])
 
 
 def merge_regions(clips, output_pbf):

@@ -486,5 +486,47 @@ class GeneratePmtilesTileByteBudget(unittest.TestCase):
         self.assertNotIn("--maximum-tile-bytes=200000", captured["cmd"])
 
 
+class ExtractRegionCompletesBoundaryRelations(unittest.TestCase):
+    # 06 impl spec Chunk L1: `osmium extract`'s default strategy drops
+    # relation member ways outside the bbox, and `--strategy smart` alone
+    # only completes type=multipolygon relations. US admin boundaries are
+    # type=boundary, so either way a cross-bbox state/county ring arrives
+    # incomplete and `osmium export` emits nothing for it (the 7->9
+    # county / 0 state label plateau). `-S types=any` completes every
+    # relation type with at least one member in the bbox.
+    BBOX = "-76.00,39.60,-74.60,40.40"
+
+    def _captured_cmd(self):
+        captured = {}
+
+        def fake_run(cmd):
+            captured["cmd"] = cmd
+
+        orig_run = g.run
+        g.run = fake_run
+        try:
+            g.extract_region("in.pbf", self.BBOX, "out.pbf")
+        finally:
+            g.run = orig_run
+        return captured["cmd"]
+
+    def test_extract_uses_smart_strategy_with_types_any(self):
+        cmd = self._captured_cmd()
+        # Each option must directly precede its value or osmium misparses.
+        i = cmd.index("--strategy")
+        self.assertEqual(cmd[i + 1], "smart")
+        j = cmd.index("-S")
+        self.assertEqual(cmd[j + 1], "types=any")
+
+    def test_extract_still_passes_bbox_input_and_output(self):
+        cmd = self._captured_cmd()
+        self.assertEqual(cmd[:2], ["osmium", "extract"])
+        k = cmd.index("--bbox")
+        self.assertEqual(cmd[k + 1], self.BBOX)
+        self.assertIn("in.pbf", cmd)
+        m = cmd.index("--output")
+        self.assertEqual(cmd[m + 1], "out.pbf")
+
+
 if __name__ == "__main__":
     unittest.main()
