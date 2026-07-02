@@ -733,14 +733,15 @@ def append_state_labels(raw_boundary_path, place_norm_path, bbox):
 # whose relation ring doesn't close is silently dropped by osmium export), so
 # presence is verified every build instead of assumed. Superset semantics:
 # bbox-edge extras (Berks PA, Cecil MD, ...) are expected and fine.
-# Entries must match the emitted `name` exactly; "Philadelphia" is the
-# consolidated city-county, which OSM names without a "County" suffix --
-# verify all entries against the first real build log and correct here.
+# Entries must match the emitted `name` exactly. Verified against the real
+# export (fixmaps PROMPTS/06 grep data + first CI run 2026-07-02): the
+# consolidated city-county IS named "Philadelphia County" on its admin_6
+# relation, despite the city relation being plain "Philadelphia".
 EXPECTED_STATE_LABELS = frozenset(STATE_LABEL_WHITELIST)
 EXPECTED_COUNTY_LABELS = frozenset({
     # PA (in/overlapping DEFAULT_BBOX)
     "Bucks County", "Montgomery County", "Chester County",
-    "Delaware County", "Philadelphia",
+    "Delaware County", "Philadelphia County",
     # NJ
     "Burlington County", "Camden County", "Gloucester County",
     "Mercer County", "Salem County",
