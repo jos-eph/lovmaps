@@ -712,6 +712,78 @@ def append_state_labels(raw_boundary_path, place_norm_path, bbox):
     print(f"  appended {n} state labels -> {place_norm_path}")
 
 
+# Label manifest: the states and core service-area counties whose labels MUST
+# be present after the append steps, or the build fails naming the gaps. OSM
+# admin boundaries are volunteer-edited and break without notice (a county
+# whose relation ring doesn't close is silently dropped by osmium export), so
+# presence is verified every build instead of assumed. Superset semantics:
+# bbox-edge extras (Berks PA, Cecil MD, ...) are expected and fine.
+# Entries must match the emitted `name` exactly; "Philadelphia" is the
+# consolidated city-county, which OSM names without a "County" suffix --
+# verify all entries against the first real build log and correct here.
+EXPECTED_STATE_LABELS = frozenset(STATE_LABEL_WHITELIST)
+EXPECTED_COUNTY_LABELS = frozenset({
+    # PA (in/overlapping DEFAULT_BBOX)
+    "Bucks County", "Montgomery County", "Chester County",
+    "Delaware County", "Philadelphia",
+    # NJ
+    "Burlington County", "Camden County", "Gloucester County",
+    "Mercer County", "Salem County",
+    # DE
+    "New Castle County",
+})
+
+
+def check_label_manifest(place_norm_path):
+    """Compare emitted state/county label names against the expected sets.
+
+    Returns (missing_states, missing_counties) as sorted lists. Pure check --
+    reporting/exiting is the call site's job (enforce_label_manifest).
+    Malformed lines and nameless features are skipped, not fatal.
+    """
+    emitted = {"state": set(), "county": set()}
+    with open(place_norm_path, "r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip().strip("\x1e")
+            if not line:
+                continue
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            props = feat.get("properties") or {}
+            cls = props.get("class")
+            name = props.get("name")
+            if cls in emitted and name:
+                emitted[cls].add(name)
+    return (sorted(EXPECTED_STATE_LABELS - emitted["state"]),
+            sorted(EXPECTED_COUNTY_LABELS - emitted["county"]))
+
+
+def enforce_label_manifest(place_norm_path):
+    """Fail the build (exit 1) if any expected state/county label is missing.
+
+    Every missing name is printed first so the log says exactly which
+    boundary to investigate. LOVMAPS_ALLOW_MISSING_LABELS=1 downgrades the
+    failure to a loud warning -- emergency lever only.
+    """
+    missing_states, missing_counties = check_label_manifest(place_norm_path)
+    if not missing_states and not missing_counties:
+        print("  label manifest OK: all expected state/county labels present")
+        return
+    for name in missing_states:
+        print(f"  [MANIFEST] missing state label: {name}")
+    for name in missing_counties:
+        print(f"  [MANIFEST] missing county label: {name}")
+    if os.environ.get("LOVMAPS_ALLOW_MISSING_LABELS") == "1":
+        print("  [WARN] MANIFEST OVERRIDE (LOVMAPS_ALLOW_MISSING_LABELS=1): "
+              "continuing despite missing labels")
+        return
+    print("  [ERROR] label manifest check failed; missing labels are listed "
+          "above (see fixmaps SPECS/06 runbook)")
+    sys.exit(1)
+
+
 def normalize_place(props):
     p = props.get("place")
     if p not in ("city", "town", "suburb", "neighbourhood"):
@@ -1108,6 +1180,8 @@ def main(argv=None):
         append_county_labels(str(raw_paths["boundary"]), str(norm_paths["place"]), bbox=bbox_tuple)
         print("\n=== State labels -> place layer ===")
         append_state_labels(str(raw_paths["boundary"]), str(norm_paths["place"]), bbox_tuple)
+        print("\n=== Label manifest check ===")
+        enforce_label_manifest(str(norm_paths["place"]))
 
     generate_pmtiles(layer_files, str(final_pmtiles))
 

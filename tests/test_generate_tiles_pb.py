@@ -565,5 +565,127 @@ class ExportShowsAssemblyErrors(unittest.TestCase):
         self.assertEqual(cmd[j + 1], "out.geojsonseq")
 
 
+def _label(cls, name):
+    """A place-layer label feature as append_*_labels writes them."""
+    props = {"class": cls}
+    if name is not None:
+        props["name"] = name
+    return {
+        "type": "Feature",
+        "properties": props,
+        "geometry": {"type": "Point", "coordinates": [-75.2, 39.9]},
+    }
+
+
+class LabelManifestCheck(unittest.TestCase):
+    # 06 impl spec Chunk L3: prompts 02->06 all happened because label loss
+    # was silent -- a green build with a hole in the map. After the label
+    # appends, the emitted names are compared against a static expected list
+    # and the build FAILS naming what's missing. Superset semantics: extra
+    # labels (neighbor-state bleed like Cecil MD / Richmond NY) are fine,
+    # missing expected ones are not. Fixtures derive from the constants so
+    # correcting a display-name string later doesn't rewrite these tests.
+
+    def _complete_labels(self):
+        return ([_label("state", n) for n in g.EXPECTED_STATE_LABELS]
+                + [_label("county", n) for n in g.EXPECTED_COUNTY_LABELS])
+
+    def test_expected_constants_exist_and_are_sane(self):
+        # The manifest must expect exactly what emission can produce: states
+        # come from the whitelist, and the core county list must include the
+        # county whose silent loss started this saga.
+        self.assertEqual(set(g.EXPECTED_STATE_LABELS), g.STATE_LABEL_WHITELIST)
+        self.assertIn("Delaware County", g.EXPECTED_COUNTY_LABELS)
+        self.assertGreaterEqual(len(g.EXPECTED_COUNTY_LABELS), 11)
+
+    def test_all_present_plus_bleed_extras_passes(self):
+        path = _write_geojsonseq(
+            self._complete_labels()
+            + [_label("county", "Cecil County"),      # MD sliver
+               _label("county", "Richmond County"),   # NY bleed
+               _label("city", "Philadelphia")])       # other class ignored
+        missing_states, missing_counties = g.check_label_manifest(path)
+        self.assertEqual(missing_states, [])
+        self.assertEqual(missing_counties, [])
+
+    def test_missing_county_is_named(self):
+        labels = [f for f in self._complete_labels()
+                  if f["properties"].get("name") != "Delaware County"]
+        path = _write_geojsonseq(labels)
+        missing_states, missing_counties = g.check_label_manifest(path)
+        self.assertEqual(missing_states, [])
+        self.assertEqual(missing_counties, ["Delaware County"])
+
+    def test_missing_state_is_named(self):
+        labels = [f for f in self._complete_labels()
+                  if f["properties"].get("name") != "New Jersey"]
+        path = _write_geojsonseq(labels)
+        missing_states, missing_counties = g.check_label_manifest(path)
+        self.assertEqual(missing_states, ["New Jersey"])
+        self.assertEqual(missing_counties, [])
+
+    def test_junk_lines_and_nameless_features_are_skipped(self):
+        path = _write_geojsonseq(self._complete_labels()
+                                 + [_label("county", None)])
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\x1enot json at all\n\n")
+        missing_states, missing_counties = g.check_label_manifest(path)
+        self.assertEqual((missing_states, missing_counties), ([], []))
+
+
+class LabelManifestEnforcement(unittest.TestCase):
+    # The main()-level gate around check_label_manifest: exit 1 with every
+    # missing name printed, unless the emergency override env is set.
+
+    def setUp(self):
+        self._saved_env = os.environ.pop("LOVMAPS_ALLOW_MISSING_LABELS", None)
+
+    def tearDown(self):
+        if self._saved_env is not None:
+            os.environ["LOVMAPS_ALLOW_MISSING_LABELS"] = self._saved_env
+        else:
+            os.environ.pop("LOVMAPS_ALLOW_MISSING_LABELS", None)
+
+    def _incomplete_path(self):
+        labels = ([_label("state", n) for n in g.EXPECTED_STATE_LABELS
+                   if n != "Delaware"]
+                  + [_label("county", n) for n in g.EXPECTED_COUNTY_LABELS
+                     if n != "Delaware County"])
+        return _write_geojsonseq(labels)
+
+    def _complete_path(self):
+        return _write_geojsonseq(
+            [_label("state", n) for n in g.EXPECTED_STATE_LABELS]
+            + [_label("county", n) for n in g.EXPECTED_COUNTY_LABELS])
+
+    def test_missing_labels_exit_nonzero_and_name_the_gaps(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx:
+            with contextlib.redirect_stdout(out):
+                g.enforce_label_manifest(self._incomplete_path())
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("Delaware County", out.getvalue())
+        self.assertIn("Delaware", out.getvalue())
+
+    def test_env_override_warns_but_does_not_exit(self):
+        import contextlib
+        import io
+        os.environ["LOVMAPS_ALLOW_MISSING_LABELS"] = "1"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            g.enforce_label_manifest(self._incomplete_path())  # must not raise
+        self.assertIn("MANIFEST OVERRIDE", out.getvalue())
+
+    def test_complete_manifest_passes_quietly(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            g.enforce_label_manifest(self._complete_path())  # must not raise
+        self.assertIn("manifest OK", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
