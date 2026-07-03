@@ -53,7 +53,10 @@ env:
   # Pinned tippecanoe source release used when the runner has no cached binary.
   TIPPECANOE_VERSION: '2.79.0'
   BASE_NAME: philly_commute_region
-  BBOX: '-76.00,39.60,-74.60,40.40'
+  # Must stay identical to generate_tiles_pb.py's DEFAULT_BBOX -- this is the
+  # value that actually governs releases (10 spec Appendix A: widened
+  # south/east; Maryland deliberately excluded, no MD source PBF above).
+  BBOX: '-76.00,39.30,-74.30,40.40'
 
 jobs:
   release:

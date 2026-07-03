@@ -613,6 +613,15 @@ class GeneratePmtilesTileByteBudget(unittest.TestCase):
         self.assertNotIn("--maximum-tile-bytes=200000", captured["cmd"])
 
 
+class DefaultBboxPin(unittest.TestCase):
+    # 10 spec Appendix A / Chunk B1: DEFAULT_BBOX here and release-tiles.yml's
+    # BBOX env var must stay byte-identical (the workflow's value is the one
+    # that actually governs releases) -- this pins the Python side so a
+    # future edit to one without the other is caught in review, not in prod.
+    def test_widened_to_include_salem_and_new_castle_co(self):
+        self.assertEqual(g.DEFAULT_BBOX, "-76.00,39.30,-74.30,40.40")
+
+
 class PadBbox(unittest.TestCase):
     # 07 resolution spec Chunk L8: the padded-bbox string builder feeding
     # tippecanoe's --clip-bounding-box.
@@ -770,7 +779,9 @@ class LabelManifestCheck(unittest.TestCase):
         # county whose silent loss started this saga.
         self.assertEqual(set(g.EXPECTED_STATE_LABELS), g.STATE_LABEL_WHITELIST)
         self.assertIn("Delaware County", g.EXPECTED_COUNTY_LABELS)
-        self.assertGreaterEqual(len(g.EXPECTED_COUNTY_LABELS), 11)
+        # 11 pre-10-spec + Atlantic/Cumberland Co. NJ from Appendix A's bbox
+        # widening (10 spec Chunk B1).
+        self.assertGreaterEqual(len(g.EXPECTED_COUNTY_LABELS), 13)
 
     def test_all_present_plus_bleed_extras_passes(self):
         path = _write_geojsonseq(

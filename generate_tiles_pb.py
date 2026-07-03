@@ -73,7 +73,7 @@ print(f"Arguments sent to generate_tiles_pb, {sys.argv = }")
 SOURCE_PBF_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf"
 SOURCE_MD5_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf.md5"
 
-DEFAULT_BBOX = "-76.00,39.60,-74.60,40.40"  # SEPTA service region
+DEFAULT_BBOX = "-76.00,39.30,-74.30,40.40"  # SEPTA service region (10 spec Appendix A: widened south/east to include Salem/New Castle Co. and the truncated NJ counties -- Maryland deliberately excluded, no MD source PBF)
 DEFAULT_BASE_NAME = "philly_commute_region"
 
 # Attribution string embedded directly in the .pmtiles metadata so the OSM +
@@ -769,11 +769,23 @@ def append_state_labels(raw_boundary_path, place_norm_path, bbox):
 # admin boundaries are volunteer-edited and break without notice (a county
 # whose relation ring doesn't close is silently dropped by osmium export), so
 # presence is verified every build instead of assumed. Superset semantics:
-# bbox-edge extras (Berks PA, Cecil MD, ...) are expected and fine.
+# bbox-edge extras (Berks PA, Cecil MD, Kent DE, ...) are expected and fine.
 # Entries must match the emitted `name` exactly. Verified against the real
 # export (fixmaps PROMPTS/06 grep data + first CI run 2026-07-02): the
 # consolidated city-county IS named "Philadelphia County" on its admin_6
 # relation, despite the city relation being plain "Philadelphia".
+#
+# Atlantic County / Cumberland County (NJ) added per 10 spec Appendix A's
+# bbox widening -- both now substantially inside DEFAULT_BBOX and expected
+# to follow the same "<Name> County" admin_6 naming the other NJ entries
+# below already confirm for this region, but not yet verified against a
+# real export (no local pipeline run); Chunk B2's CI run is the first real
+# check. If either name is wrong, the manifest fails loudly and names the
+# gap -- see check_label_manifest / LOVMAPS_ALLOW_MISSING_LABELS below.
+# Maryland is deliberately NOT added here: DEFAULT_BBOX's southwest corner
+# overlaps Cecil County MD, but there is no Maryland source PBF (human
+# directive, 10 spec), so that corner is expected to render without a
+# label -- it is not manifest-required.
 EXPECTED_STATE_LABELS = frozenset(STATE_LABEL_WHITELIST)
 EXPECTED_COUNTY_LABELS = frozenset({
     # PA (in/overlapping DEFAULT_BBOX)
@@ -781,7 +793,7 @@ EXPECTED_COUNTY_LABELS = frozenset({
     "Delaware County", "Philadelphia County",
     # NJ
     "Burlington County", "Camden County", "Gloucester County",
-    "Mercer County", "Salem County",
+    "Mercer County", "Salem County", "Atlantic County", "Cumberland County",
     # DE
     "New Castle County",
 })
