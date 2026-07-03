@@ -1109,12 +1109,15 @@ def normalize_geojsonseq(input_path, output_path, normalizer):
 ZOOM_FILTERS = {
     "transportation": [
         "any",
+        # motorway/trunk/primary skeleton stays ungated (z10+, matching the
+        # tileset's minzoom) for regional orientation -- 08 spec Chunk B1,
+        # human override of the "drop all road classes below z13" default.
         ["in", "class", "motorway", "trunk", "primary"],
-        ["all", [">=", "$zoom", 8],  ["in", "class", "secondary", "tertiary"]],
         ["all", [">=", "$zoom", 10], ["in", "class", "rail", "transit"]],
-        ["all", [">=", "$zoom", 11], ["in", "class", "minor", "service"]],
+        ["all", [">=", "$zoom", 13],
+         ["in", "class", "secondary", "tertiary", "minor", "service"]],
     ],
-    "transportation_name": [">=", "$zoom", 12],
+    "transportation_name": [">=", "$zoom", 13],
     "landcover": [
         "any",
         ["in", "class", "park", "wood"],

@@ -555,6 +555,44 @@ class BoundaryZoomFilterGatesAdminLevel8(unittest.TestCase):
                       any_branches)
 
 
+class TransportationZoomFilterGatesStreetsToZoom13(unittest.TestCase):
+    # 08_fix_labels spec Chunk B1: street geometry (secondary/tertiary/minor/
+    # service) is not needed above zoom 13 and costs ~7.5 MB compressed to
+    # keep -- drop it below z13. Human override kept the motorway/trunk/
+    # primary skeleton ungated (regional orientation at z10-12) rather than
+    # gating it to z13 like the rest of the road classes.
+    def test_no_road_class_branch_below_zoom_13(self):
+        branches = g.ZOOM_FILTERS["transportation"]
+        for branch in branches:
+            if (isinstance(branch, list) and len(branch) == 3
+                    and branch[0] == "all"
+                    and isinstance(branch[2], list)
+                    and branch[2][0] == "in" and branch[2][1] == "class"):
+                classes = set(branch[2][2:])
+                gated_streets = classes & {
+                    "secondary", "tertiary", "minor", "service"}
+                if gated_streets:
+                    self.assertEqual(branch[1], [">=", "$zoom", 13],
+                                      f"{gated_streets} must gate at z13")
+
+    def test_motorway_trunk_primary_skeleton_ungated(self):
+        # Human override (spec Chunk B1 annotation): retain the regional
+        # skeleton at z10-12 rather than dropping it with the other classes.
+        branches = g.ZOOM_FILTERS["transportation"]
+        self.assertIn(["in", "class", "motorway", "trunk", "primary"],
+                      branches)
+
+    def test_rail_transit_still_admitted_at_zoom_10(self):
+        branches = g.ZOOM_FILTERS["transportation"]
+        self.assertIn(
+            ["all", [">=", "$zoom", 10], ["in", "class", "rail", "transit"]],
+            branches)
+
+    def test_transportation_name_gates_at_zoom_13(self):
+        self.assertEqual(g.ZOOM_FILTERS["transportation_name"],
+                         [">=", "$zoom", 13])
+
+
 class GeneratePmtilesTileByteBudget(unittest.TestCase):
     # 03_Still_cant_see_counties Chunk 2A: belt-and-suspenders headroom for
     # the label points sharing the densest (z10) tile with the road network.
