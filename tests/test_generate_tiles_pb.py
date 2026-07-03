@@ -575,6 +575,53 @@ class GeneratePmtilesTileByteBudget(unittest.TestCase):
         self.assertNotIn("--maximum-tile-bytes=200000", captured["cmd"])
 
 
+class PadBbox(unittest.TestCase):
+    # 07 resolution spec Chunk L8: the padded-bbox string builder feeding
+    # tippecanoe's --clip-bounding-box.
+    def test_pads_each_side_by_default_amount(self):
+        padded = g.pad_bbox("-76.00,39.60,-74.60,40.40")
+        self.assertEqual(padded, "-76.15,39.45,-74.45,40.55")
+
+    def test_custom_pad_amount(self):
+        padded = g.pad_bbox("-76.00,39.60,-74.60,40.40", pad_deg=1.0)
+        self.assertEqual(padded, "-77.0,38.6,-73.6,41.4")
+
+    def test_no_float_repr_artifacts(self):
+        # Plain float addition on these inputs produces -74.44999999999999;
+        # the builder must round that away.
+        padded = g.pad_bbox("-76.00,39.60,-74.60,40.40")
+        for part in padded.split(","):
+            self.assertNotIn("999999", part)
+            self.assertNotIn("000000", part)
+
+
+class GeneratePmtilesClipBoundingBox(unittest.TestCase):
+    # 07 resolution spec Chunk L8: clip the archive back to (a padded) bbox
+    # so the types=any ring overhang (z13 tile count 948 -> 3,594, +2.7 MB)
+    # doesn't ship -- label placement is unaffected (computed pre-tippecanoe).
+    def _captured_cmd(self, **kwargs):
+        captured = {}
+
+        def fake_run(cmd):
+            captured["cmd"] = cmd
+
+        orig_run = g.run
+        g.run = fake_run
+        try:
+            g.generate_pmtiles([("layer", "/dev/null")], "/tmp/out.pmtiles", **kwargs)
+        finally:
+            g.run = orig_run
+        return captured["cmd"]
+
+    def test_bbox_given_adds_padded_clip_flag(self):
+        cmd = self._captured_cmd(bbox="-76.00,39.60,-74.60,40.40")
+        self.assertIn("--clip-bounding-box=-76.15,39.45,-74.45,40.55", cmd)
+
+    def test_bbox_omitted_adds_no_clip_flag(self):
+        cmd = self._captured_cmd()
+        self.assertFalse(any(c.startswith("--clip-bounding-box") for c in cmd))
+
+
 class ExtractRegionCompletesBoundaryRelations(unittest.TestCase):
     # 06 impl spec Chunk L1: `osmium extract`'s default strategy drops
     # relation member ways outside the bbox, and `--strategy smart` alone

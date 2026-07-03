@@ -381,6 +381,30 @@ def parse_bbox(bbox_str):
     return minlon, minlat, maxlon, maxlat
 
 
+# Padding for the tippecanoe --clip-bounding-box in generate_pmtiles (07
+# resolution spec Chunk L8): keeps the archive's outer frame from looking
+# bare just inside the exact service-area bbox.
+CLIP_BBOX_PAD_DEG = 0.15
+
+
+def pad_bbox(bbox_str, pad_deg=CLIP_BBOX_PAD_DEG):
+    """Pad a 'minlon,minlat,maxlon,maxlat' bbox string outward by [pad_deg]
+    degrees on each side, formatted for tippecanoe's --clip-bounding-box.
+
+    `-S types=any` (Chunk L1) completes admin relations far past the bbox,
+    which ballooned the tileset bounds to all of PA+NJ+DE and the z13 tile
+    count from 948 to 3,594 -- ~2,650 near-empty border-tracing tiles that
+    cost +2.7 MB and buy nothing visible in-region (07 resolution spec §2).
+    Clipping the *archive* back to (a slightly padded) bbox recovers that
+    without touching label placement, which is computed pre-tippecanoe and
+    already clips independently via clip_ring_to_bbox. round() avoids float
+    repr artifacts like 40.39999999999999 from plain float addition.
+    """
+    minlon, minlat, maxlon, maxlat = parse_bbox(bbox_str)
+    return (f"{round(minlon - pad_deg, 6)},{round(minlat - pad_deg, 6)},"
+            f"{round(maxlon + pad_deg, 6)},{round(maxlat + pad_deg, 6)}")
+
+
 def clip_ring_to_bbox(ring, bbox):
     """Sutherland-Hodgman clip of a closed ring to an axis-aligned bbox.
 
@@ -915,7 +939,7 @@ ZOOM_FILTERS = {
 }
 
 
-def generate_pmtiles(layer_files, output_pmtiles, min_zoom="10", max_zoom="13"):
+def generate_pmtiles(layer_files, output_pmtiles, min_zoom="10", max_zoom="13", bbox=None):
     print(f"\n=== Stage 5: tippecanoe combine -> {output_pmtiles} ===")
     cmd = [
         "tippecanoe",
@@ -933,8 +957,13 @@ def generate_pmtiles(layer_files, output_pmtiles, min_zoom="10", max_zoom="13"):
         "--simplify-only-low-zooms",
         "--detect-shared-borders",
         "--maximum-tile-bytes=500000",
-        "-j", json.dumps(ZOOM_FILTERS),
     ]
+    if bbox is not None:
+        # Chunk L8: discard the types=any ring overhang past the service
+        # area (see pad_bbox docstring) -- ~2.7 MB of near-empty border tiles
+        # with no in-region visual benefit.
+        cmd.append(f"--clip-bounding-box={pad_bbox(bbox)}")
+    cmd += ["-j", json.dumps(ZOOM_FILTERS)]
     for layer_name, path in layer_files:
         cmd.append(f"-L{layer_name}:{path}")
     run(cmd)
@@ -1212,7 +1241,7 @@ def main(argv=None):
         print("\n=== Label manifest check ===")
         enforce_label_manifest(str(norm_paths["place"]))
 
-    generate_pmtiles(layer_files, str(final_pmtiles))
+    generate_pmtiles(layer_files, str(final_pmtiles), bbox=args.bbox)
 
     if not args.keep_intermediates:
         print("\n=== Cleaning up intermediates ===")
