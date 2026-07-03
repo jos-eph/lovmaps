@@ -943,5 +943,338 @@ class CountyLabelDebugProps(unittest.TestCase):
                          {"class": "state", "name": "Delaware"})
 
 
+class DouglasPeucker(unittest.TestCase):
+    # 07 resolution spec Chunk L9: the simplification step for
+    # region_labels.json ring geometry.
+    def test_collinear_points_are_dropped(self):
+        # A square ring with extra collinear points along each edge must
+        # simplify down to just the four corners.
+        ring = [
+            [0, 0], [5, 0], [10, 0],
+            [10, 5], [10, 10],
+            [5, 10], [0, 10],
+            [0, 5], [0, 0],
+        ]
+        simplified = g.douglas_peucker(ring, epsilon=0.01)
+        self.assertEqual(simplified, [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]])
+
+    def test_point_beyond_epsilon_is_kept(self):
+        # A notch that deviates well past epsilon from the straight line
+        # must survive simplification.
+        ring = [[0, 0], [5, 3], [10, 0]]
+        simplified = g.douglas_peucker(ring, epsilon=0.5)
+        self.assertIn([5, 3], simplified)
+
+    def test_point_within_epsilon_is_dropped(self):
+        ring = [[0, 0], [5, 0.01], [10, 0]]
+        simplified = g.douglas_peucker(ring, epsilon=0.5)
+        self.assertEqual(simplified, [[0, 0], [10, 0]])
+
+    def test_short_input_returned_unchanged(self):
+        self.assertEqual(g.douglas_peucker([], 1.0), [])
+        self.assertEqual(g.douglas_peucker([[0, 0]], 1.0), [[0, 0]])
+        self.assertEqual(g.douglas_peucker([[0, 0], [1, 1]], 1.0), [[0, 0], [1, 1]])
+
+    def test_does_not_mutate_input(self):
+        ring = [[0, 0], [5, 0.01], [10, 0]]
+        original = [list(p) for p in ring]
+        g.douglas_peucker(ring, epsilon=0.5)
+        self.assertEqual(ring, original)
+
+
+class RegionLabelRings(unittest.TestCase):
+    def test_polygon_clipped_and_simplified(self):
+        # Extra collinear points on the visible (right) half must simplify
+        # away; the invisible left half must not appear at all.
+        ring = [
+            [0, 0], [5, 0], [10, 0], [10, 10], [5, 10], [0, 10], [0, 0],
+        ]
+        rings = g.region_label_rings(
+            {"type": "Polygon", "coordinates": [ring]}, bbox=(5, -5, 20, 20),
+            epsilon=0.01)
+        self.assertEqual(len(rings), 1)
+        xs = [p[0] for p in rings[0]]
+        self.assertTrue(all(x >= 5 - 1e-9 for x in xs), rings[0])
+        self.assertEqual(rings[0], [[5, 0], [10, 0], [10, 10], [5, 10], [5, 0]])
+
+    def test_multipolygon_yields_one_ring_per_part(self):
+        rings = g.region_label_rings(
+            {"type": "MultiPolygon", "coordinates": [[SQUARE], [SQUARE2]]},
+            bbox=(-100, -100, 100, 100), epsilon=0.01)
+        self.assertEqual(len(rings), 2)
+
+    def test_entirely_outside_bbox_yields_no_rings(self):
+        rings = g.region_label_rings(
+            {"type": "Polygon", "coordinates": [SQUARE]},
+            bbox=(100, 100, 200, 200), epsilon=0.01)
+        self.assertEqual(rings, [])
+
+
+class IterRegionLabelFeatures(unittest.TestCase):
+    def test_state_and_county_both_emitted(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="Pennsylvania"),
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="Maryland"),  # not whitelisted
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Bucks County"),
+        ])
+        try:
+            feats = list(g.iter_region_label_features(path, bbox=(-100, -100, 100, 100)))
+        finally:
+            os.remove(path)
+        by_class = {(f["class"], f["name"]) for f in feats}
+        self.assertIn(("state", "Pennsylvania"), by_class)
+        self.assertIn(("county", "Bucks County"), by_class)
+        self.assertNotIn(("state", "Maryland"), by_class)
+        for f in feats:
+            self.assertTrue(f["rings"])
+
+    def test_dedupe_ladder_matches_county_labels(self):
+        # Same wikidata, two fragments -> exactly one feature (Chunk L4 ladder).
+        small = [[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [small]},
+                     admin_level="6", name="Sussex County", wikidata="Q156213"),
+            _feature({"type": "Polygon", "coordinates": [SQUARE2]},
+                     admin_level="6", name="Sussex County", wikidata="Q156213"),
+        ])
+        try:
+            feats = list(g.iter_region_label_features(path, bbox=(-100, -100, 100, 100)))
+        finally:
+            os.remove(path)
+        self.assertEqual(len(feats), 1)
+
+    def test_junk_linestring_never_yields_a_region_label(self):
+        path = _write_geojsonseq([
+            _feature({"type": "LineString", "coordinates": [[0, 0], [1, 1], [2, 0]]},
+                     admin_level="6", name="Rocky Brook"),
+        ])
+        try:
+            feats = list(g.iter_region_label_features(path, bbox=(-100, -100, 100, 100)))
+        finally:
+            os.remove(path)
+        self.assertEqual(feats, [])
+
+    def test_feature_with_no_surviving_rings_is_skipped(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Offscreen County"),
+        ])
+        try:
+            feats = list(g.iter_region_label_features(path, bbox=(100, 100, 200, 200)))
+        finally:
+            os.remove(path)
+        self.assertEqual(feats, [])
+
+    def test_wikidata_and_fips_carried_when_present(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Delaware County",
+                     wikidata="Q27844", **{"nist:fips_code": "42045"}),
+        ])
+        try:
+            feats = list(g.iter_region_label_features(path, bbox=(-100, -100, 100, 100)))
+        finally:
+            os.remove(path)
+        self.assertEqual(len(feats), 1)
+        self.assertEqual(feats[0]["wikidata"], "Q27844")
+        self.assertEqual(feats[0]["fips"], "42045")
+
+    def test_absent_keys_omitted(self):
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Lycoming County"),
+        ])
+        try:
+            feats = list(g.iter_region_label_features(path, bbox=(-100, -100, 100, 100)))
+        finally:
+            os.remove(path)
+        self.assertNotIn("wikidata", feats[0])
+        self.assertNotIn("fips", feats[0])
+
+
+class RegionLabelsDocument(unittest.TestCase):
+    # 07 resolution spec Chunk L9: schema round-trip + manifest wiring.
+    def _raw_path(self):
+        return _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
+                     admin_level="4", name="Pennsylvania"),
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Bucks County"),
+        ])
+
+    def test_build_region_labels_schema(self):
+        raw_path = self._raw_path()
+        try:
+            doc = g.build_region_labels(raw_path, "-100,-100,100,100")
+        finally:
+            os.remove(raw_path)
+        self.assertEqual(doc["version"], g.REGION_LABELS_SCHEMA_VERSION)
+        self.assertEqual(doc["bbox"], "-100,-100,100,100")
+        names = {f["name"] for f in doc["features"]}
+        self.assertEqual(names, {"Pennsylvania", "Bucks County"})
+
+    def test_write_region_labels_round_trips_through_json(self):
+        raw_path = self._raw_path()
+        out_path = raw_path + ".region_labels.json"
+        try:
+            doc = g.write_region_labels(raw_path, "-100,-100,100,100", out_path)
+            with open(out_path, "r", encoding="utf-8") as f:
+                reloaded = json.load(f)
+        finally:
+            os.remove(raw_path)
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        self.assertEqual(reloaded, doc)
+        for feat in reloaded["features"]:
+            self.assertIn("class", feat)
+            self.assertIn("name", feat)
+            self.assertIn("rings", feat)
+            for ring in feat["rings"]:
+                self.assertGreaterEqual(len(ring), 4)
+                self.assertEqual(ring[0], ring[-1])
+
+
+class RegionLabelsManifest(unittest.TestCase):
+    # Mirrors LabelManifestCheck/LabelManifestEnforcement but against the
+    # region_labels.json schema (top-level class/name per feature, not
+    # nested under "properties").
+    def setUp(self):
+        self._saved_env = os.environ.pop("LOVMAPS_ALLOW_MISSING_LABELS", None)
+
+    def tearDown(self):
+        if self._saved_env is not None:
+            os.environ["LOVMAPS_ALLOW_MISSING_LABELS"] = self._saved_env
+        else:
+            os.environ.pop("LOVMAPS_ALLOW_MISSING_LABELS", None)
+
+    @staticmethod
+    def _region_feature(cls, name):
+        return {"class": cls, "name": name, "rings": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}
+
+    def _write_doc(self, features):
+        fd, path = tempfile.mkstemp(suffix=".region_labels.json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "bbox": "0,0,1,1", "features": features}, f)
+        return path
+
+    def _complete_features(self):
+        return ([self._region_feature("state", n) for n in g.EXPECTED_STATE_LABELS]
+                + [self._region_feature("county", n) for n in g.EXPECTED_COUNTY_LABELS])
+
+    def test_complete_document_has_no_missing(self):
+        path = self._write_doc(self._complete_features())
+        try:
+            missing_states, missing_counties = g.check_region_labels_manifest(path)
+        finally:
+            os.remove(path)
+        self.assertEqual((missing_states, missing_counties), ([], []))
+
+    def test_missing_county_is_named(self):
+        features = [f for f in self._complete_features()
+                    if f["name"] != "Delaware County"]
+        path = self._write_doc(features)
+        try:
+            _, missing_counties = g.check_region_labels_manifest(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(missing_counties, ["Delaware County"])
+
+    def test_enforce_exits_nonzero_and_names_the_gap(self):
+        import contextlib
+        import io
+        features = [f for f in self._complete_features()
+                    if f["name"] != "Delaware County"]
+        path = self._write_doc(features)
+        out = io.StringIO()
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                with contextlib.redirect_stdout(out):
+                    g.enforce_region_labels_manifest(path)
+        finally:
+            os.remove(path)
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("Delaware County", out.getvalue())
+
+    def test_enforce_env_override_warns_but_does_not_exit(self):
+        import contextlib
+        import io
+        os.environ["LOVMAPS_ALLOW_MISSING_LABELS"] = "1"
+        features = [f for f in self._complete_features()
+                    if f["name"] != "Delaware County"]
+        path = self._write_doc(features)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                g.enforce_region_labels_manifest(path)  # must not raise
+        finally:
+            os.remove(path)
+        self.assertIn("MANIFEST OVERRIDE", out.getvalue())
+
+    def test_enforce_complete_passes_quietly(self):
+        import contextlib
+        import io
+        path = self._write_doc(self._complete_features())
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                g.enforce_region_labels_manifest(path)  # must not raise
+        finally:
+            os.remove(path)
+        self.assertIn("manifest OK", out.getvalue())
+
+
+class RegionLabelsSizeBudget(unittest.TestCase):
+    # 07 resolution spec Chunk L9: "Douglas-Peucker simplified to a ~100 KB
+    # total budget" -- a sanity check that REGION_LABELS_SIMPLIFY_EPSILON_DEG
+    # actually keeps a realistically-complex build under the stated ~150 KB
+    # ceiling, using synthetic county/state-sized noisy-circle rings as a
+    # stand-in for real OSM detail (real validation happens against the
+    # actual archive at the H7 human checkpoint).
+    @staticmethod
+    def _noisy_ring(cx, cy, radius, n=800, noise=0.0003, seed=0):
+        import math
+        rnd = __import__("random").Random(seed)
+        pts = []
+        for i in range(n):
+            theta = 2 * math.pi * i / n
+            r = radius + rnd.uniform(-noise, noise)
+            pts.append([cx + r * math.cos(theta), cy + r * math.sin(theta)])
+        pts.append(pts[0])
+        return pts
+
+    def test_fourteen_areas_stay_under_150kb(self):
+        features = []
+        # 11 counties + 3 states, spread so bbox-clipping doesn't trivially
+        # drop any of them -- each is its own noisy ring, county-radius-ish.
+        names = list(g.EXPECTED_COUNTY_LABELS) + list(g.EXPECTED_STATE_LABELS)
+        for i, name in enumerate(names):
+            cx, cy = (i % 4) * 3, (i // 4) * 3
+            admin_level = "4" if name in g.STATE_LABEL_WHITELIST else "6"
+            ring = self._noisy_ring(cx, cy, radius=1.0, seed=i)
+            features.append(_feature({"type": "Polygon", "coordinates": [ring]},
+                                      admin_level=admin_level, name=name))
+        raw_path = _write_geojsonseq(features)
+        out_path = raw_path + ".region_labels.json"
+        try:
+            doc = g.build_region_labels(raw_path, "-2,-2,20,20")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(doc, f, separators=(",", ":"))
+            size = os.path.getsize(out_path)
+            raw_points = sum(len(self._noisy_ring(0, 0, 1.0, seed=i))
+                              for i in range(len(names)))
+            simplified_points = sum(len(r) for f in doc["features"] for r in f["rings"])
+        finally:
+            os.remove(raw_path)
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        self.assertEqual(len(doc["features"]), len(names))
+        self.assertLess(simplified_points, raw_points,
+                         "Douglas-Peucker did not reduce vertex count")
+        self.assertLessEqual(size, 150_000, f"region_labels.json is {size} bytes")
+
+
 if __name__ == "__main__":
     unittest.main()

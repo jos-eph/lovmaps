@@ -221,7 +221,8 @@ jobs:
           set -euo pipefail
           PMTILES="./out/${BASE_NAME}_${DATE}.pmtiles"
           PBF="./out/${BASE_NAME}_${DATE}.osm.pbf"
-          for f in "${PMTILES}" "${PBF}"; do
+          REGION_LABELS="./out/${BASE_NAME}_${DATE}.region_labels.json"
+          for f in "${PMTILES}" "${PBF}" "${REGION_LABELS}"; do
             if [ ! -f "${f}" ]; then
               echo "::error::Expected output missing: ${f}"
               exit 1
@@ -233,13 +234,24 @@ jobs:
             echo "::error::pmtiles is suspiciously small (< 100 KB); refusing to publish."
             exit 1
           fi
+          # region_labels.json (07 resolution spec Chunk L9): its own manifest
+          # check (enforce_region_labels_manifest) already failed the build if
+          # a required state/county area is missing, so this is just a basic
+          # sanity floor plus the ~150 KB simplification budget from the spec.
+          python3 -c "import json,sys; d=json.load(open('${REGION_LABELS}')); sys.exit(0 if d.get('features') else 1)" \
+            || { echo "::error::region_labels.json has no features"; exit 1; }
+          RL_SIZE="$(stat -c '%s' "${REGION_LABELS}")"
+          echo "region_labels.json size: ${RL_SIZE} bytes"
+          if [ "${RL_SIZE}" -gt 200000 ]; then
+            echo "::warning::region_labels.json is ${RL_SIZE} bytes, over the ~150 KB simplification budget (07 resolution spec §2/L9) -- not failing the build, but worth a look."
+          fi
 
       - name: Generate sha256 sidecars (dated)
         # `sha256sum` output format — consumers verify with `sha256sum -c`.
         run: |
           set -euo pipefail
           cd ./out
-          for ext in pmtiles osm.pbf; do
+          for ext in pmtiles osm.pbf region_labels.json; do
             f="${BASE_NAME}_${DATE}.${ext}"
             sha256sum "${f}" > "${f}.sha256"
             echo "sha256(${f}) = $(awk '{print $1}' "${f}.sha256")"
@@ -251,6 +263,7 @@ jobs:
           RUN_TXT="./out/${BASE_NAME}_${DATE}.run.txt"
           PMTILES_SHA="$(awk '{print $1}' "./out/${BASE_NAME}_${DATE}.pmtiles.sha256")"
           PBF_SHA="$(awk '{print $1}' "./out/${BASE_NAME}_${DATE}.osm.pbf.sha256")"
+          REGION_LABELS_SHA="$(awk '{print $1}' "./out/${BASE_NAME}_${DATE}.region_labels.json.sha256")"
           {
             echo "date: ${DATE}"
             echo "generated_at_utc: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -266,6 +279,7 @@ jobs:
             echo "bbox: ${BBOX}"
             echo "pmtiles_sha256: ${PMTILES_SHA}"
             echo "osm_pbf_sha256: ${PBF_SHA}"
+            echo "region_labels_json_sha256: ${REGION_LABELS_SHA}"
             echo "tippecanoe_version: ${TIPPECANOE_VERSION}"
           } > "${RUN_TXT}"
           cat "${RUN_TXT}"
@@ -277,11 +291,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ./out/current
-          for ext in pmtiles osm.pbf; do
+          for ext in pmtiles osm.pbf region_labels.json; do
             cp "./out/${BASE_NAME}_${DATE}.${ext}" "./out/current/${BASE_NAME}_current.${ext}"
           done
           cd ./out/current
-          for ext in pmtiles osm.pbf; do
+          for ext in pmtiles osm.pbf region_labels.json; do
             f="${BASE_NAME}_current.${ext}"
             sha256sum "${f}" > "${f}.sha256"
           done
@@ -313,6 +327,8 @@ jobs:
             "./out/${BASE_NAME}_${DATE}.pmtiles.sha256"
             "./out/${BASE_NAME}_${DATE}.osm.pbf"
             "./out/${BASE_NAME}_${DATE}.osm.pbf.sha256"
+            "./out/${BASE_NAME}_${DATE}.region_labels.json"
+            "./out/${BASE_NAME}_${DATE}.region_labels.json.sha256"
             "./out/${BASE_NAME}_${DATE}.run.txt"
           )
           if [ -f ATTRIBUTION.txt ]; then
@@ -345,6 +361,8 @@ jobs:
             "./out/current/${BASE_NAME}_current.pmtiles.sha256"
             "./out/current/${BASE_NAME}_current.osm.pbf"
             "./out/current/${BASE_NAME}_current.osm.pbf.sha256"
+            "./out/current/${BASE_NAME}_current.region_labels.json"
+            "./out/current/${BASE_NAME}_current.region_labels.json.sha256"
           )
           if [ -f ATTRIBUTION.txt ]; then
             ASSETS+=(ATTRIBUTION.txt)

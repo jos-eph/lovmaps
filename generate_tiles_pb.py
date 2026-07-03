@@ -837,6 +837,222 @@ def enforce_label_manifest(place_norm_path):
     sys.exit(1)
 
 
+# ---------- region_labels.json: client-side dynamic area-label sidecar ----------
+#
+# 07 resolution spec §1 Cause 2 (decisive): the renderer discards any tile-
+# embedded label whose text box crosses a tile edge, so a single Point label
+# per admin area can never label a border viewport at street zoom -- and
+# "PENNSYLVANIA" is geometrically impossible at every zoom regardless of
+# placement. §3 Option A's fix moves label placement out of the tile pipeline
+# entirely: ship simplified, bbox-clipped outline rings so a map client can
+# compute the centroid of whatever portion of each area is actually visible,
+# continuously as the viewport pans (the Google Maps behavior this was all
+# for). This section builds that sidecar; iter_county_labels/iter_state_labels
+# above still emit the tile-embedded Point labels unchanged (CI manifest
+# value, other consumers, debuggability -- the app just stops drawing them,
+# per spec Chunk B6).
+
+REGION_LABELS_SCHEMA_VERSION = 1
+# ~150 m at these latitudes -- adequate for area-label placement (not
+# road-accuracy geometry); keeps the sidecar within its ~100-150 KB budget.
+REGION_LABELS_SIMPLIFY_EPSILON_DEG = 0.0015
+
+
+def _perpendicular_distance(point, line_start, line_end):
+    """Perpendicular distance from [point] to the (infinite) line through
+    [line_start]/[line_end]; falls back to point-to-point distance if the
+    two endpoints coincide."""
+    x, y = point
+    x1, y1 = line_start
+    x2, y2 = line_end
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0 and dy == 0:
+        return ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5
+    t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)
+    proj_x, proj_y = x1 + t * dx, y1 + t * dy
+    return ((x - proj_x) ** 2 + (y - proj_y) ** 2) ** 0.5
+
+
+def douglas_peucker(points, epsilon):
+    """Ramer-Douglas-Peucker polyline simplification.
+
+    [points] is a list of [x, y] pairs (open chain or closed ring -- a closed
+    ring's shared start/end point is always an endpoint of some recursive
+    call, so it is always kept and the result stays closed). [epsilon] is the
+    maximum perpendicular distance (coordinate units) a dropped point may
+    deviate from the straight line between its surviving neighbors. Does not
+    mutate [points]. Fewer than 3 points is already maximally simple.
+    """
+    if len(points) < 3:
+        return list(points)
+    start, end = points[0], points[-1]
+    max_dist = -1.0
+    max_idx = 0
+    for i in range(1, len(points) - 1):
+        dist = _perpendicular_distance(points[i], start, end)
+        if dist > max_dist:
+            max_dist = dist
+            max_idx = i
+    if max_dist <= epsilon:
+        return [start, end]
+    left = douglas_peucker(points[:max_idx + 1], epsilon)
+    right = douglas_peucker(points[max_idx:], epsilon)
+    return left[:-1] + right
+
+
+def _admin_areas_by_key(raw_boundary_path, admin_level, name_ok=None):
+    """Read the raw boundary export; keep the largest-geometry feature per
+    dedupe key (wikidata -> nist:fips_code -> name -- the Chunk L4 ladder),
+    restricted to [admin_level] and, if given, to names for which
+    name_ok(name) is true. Polygon/MultiPolygon geometry only (mirrors the
+    Chunk L7 junk filter in iter_county_labels).
+
+    Returns {key: (name, properties, geometry)}. Separate from
+    iter_county_labels/iter_state_labels (which predate this helper and emit
+    a different shape -- a label Point, not outline rings) to avoid
+    disturbing their already CI-verified behavior.
+    """
+    best = {}
+    sizes = {}
+    with open(raw_boundary_path, "r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip().strip("\x1e")
+            if not line:
+                continue
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            props = feat.get("properties") or {}
+            try:
+                al = int(props.get("admin_level"))
+            except (ValueError, TypeError):
+                continue
+            if al != admin_level:
+                continue
+            name = props.get("name")
+            if not name:
+                continue
+            if name_ok is not None and not name_ok(name):
+                continue
+            geom = feat.get("geometry") or {}
+            if geom.get("type") not in ("Polygon", "MultiPolygon"):
+                continue
+            size = _geometry_size(geom)
+            key = props.get("wikidata") or props.get("nist:fips_code") or name
+            if key not in sizes or size > sizes[key]:
+                sizes[key] = size
+                best[key] = (name, props, geom)
+    return best
+
+
+def region_label_rings(geometry, bbox, epsilon=REGION_LABELS_SIMPLIFY_EPSILON_DEG):
+    """Exterior ring(s) of a Polygon/MultiPolygon, bbox-clipped
+    (clip_ring_to_bbox) then Douglas-Peucker simplified. A ring clipped down
+    to fewer than 4 points (nothing visible in-region) is dropped. Interior
+    holes are not carried -- irrelevant for centroid-based label placement."""
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "Polygon" and coords:
+        raw_rings = [coords[0]]
+    elif gtype == "MultiPolygon":
+        raw_rings = [poly[0] for poly in coords if poly]
+    else:
+        raw_rings = []
+    out = []
+    for ring in raw_rings:
+        clipped = clip_ring_to_bbox(ring, bbox)
+        if len(clipped) < 4:
+            continue
+        out.append(douglas_peucker(clipped, epsilon))
+    return out
+
+
+def iter_region_label_features(raw_boundary_path, bbox):
+    """Yield one {class, name, wikidata?, fips?, rings} dict per whitelisted
+    state or named county whose bbox-clipped outline survives (07 resolution
+    spec Chunk L9). [bbox] is a (minlon, minlat, maxlon, maxlat) tuple."""
+    for cls, admin_level, name_ok in (
+        ("state", 4, lambda n: n in STATE_LABEL_WHITELIST),
+        ("county", 6, None),
+    ):
+        for name, props, geom in _admin_areas_by_key(raw_boundary_path, admin_level, name_ok).values():
+            rings = region_label_rings(geom, bbox)
+            if not rings:
+                continue
+            out = {"class": cls, "name": name}
+            if props.get("wikidata"):
+                out["wikidata"] = props["wikidata"]
+            if props.get("nist:fips_code"):
+                out["fips"] = props["nist:fips_code"]
+            out["rings"] = rings
+            yield out
+
+
+def build_region_labels(raw_boundary_path, bbox_str):
+    """Build the region_labels.json document: {version, bbox, features}.
+    [bbox_str] is the pipeline's 'minlon,minlat,maxlon,maxlat' string,
+    embedded verbatim so a consumer can tell what area the outlines were
+    clipped to."""
+    bbox = parse_bbox(bbox_str)
+    return {
+        "version": REGION_LABELS_SCHEMA_VERSION,
+        "bbox": bbox_str,
+        "features": list(iter_region_label_features(raw_boundary_path, bbox)),
+    }
+
+
+def write_region_labels(raw_boundary_path, bbox_str, output_path):
+    """Write the region_labels.json document and return it (for the manifest
+    check / logging at the call site)."""
+    doc = build_region_labels(raw_boundary_path, bbox_str)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(doc, f, separators=(",", ":"))
+    size = os.path.getsize(output_path)
+    print(f"  wrote {len(doc['features'])} region-label features -> "
+          f"{output_path} ({size} bytes)")
+    return doc
+
+
+def check_region_labels_manifest(region_labels_path):
+    """Compare region_labels.json's feature names against the same
+    EXPECTED_STATE_LABELS / EXPECTED_COUNTY_LABELS manifest used for the
+    tile-embedded place layer (Chunk L3) -- the two pathways must never
+    silently diverge on which areas are present. Returns (missing_states,
+    missing_counties) as sorted lists."""
+    with open(region_labels_path, "r", encoding="utf-8") as f:
+        doc = json.load(f)
+    emitted = {"state": set(), "county": set()}
+    for feat in doc.get("features", []):
+        cls = feat.get("class")
+        name = feat.get("name")
+        if cls in emitted and name:
+            emitted[cls].add(name)
+    return (sorted(EXPECTED_STATE_LABELS - emitted["state"]),
+            sorted(EXPECTED_COUNTY_LABELS - emitted["county"]))
+
+
+def enforce_region_labels_manifest(region_labels_path):
+    """Fail the build (exit 1) if region_labels.json is missing any expected
+    state/county area. Mirrors enforce_label_manifest, including the
+    LOVMAPS_ALLOW_MISSING_LABELS emergency override."""
+    missing_states, missing_counties = check_region_labels_manifest(region_labels_path)
+    if not missing_states and not missing_counties:
+        print("  region_labels manifest OK: all expected state/county areas present")
+        return
+    for name in missing_states:
+        print(f"  [MANIFEST] region_labels.json missing state area: {name}")
+    for name in missing_counties:
+        print(f"  [MANIFEST] region_labels.json missing county area: {name}")
+    if os.environ.get("LOVMAPS_ALLOW_MISSING_LABELS") == "1":
+        print("  [WARN] MANIFEST OVERRIDE (LOVMAPS_ALLOW_MISSING_LABELS=1): "
+              "continuing despite missing region_labels areas")
+        return
+    print("  [ERROR] region_labels manifest check failed; missing areas are "
+          "listed above (see fixmaps SPECS/07_still_problems)")
+    sys.exit(1)
+
+
 def normalize_place(props):
     p = props.get("place")
     if p not in ("city", "town", "suburb", "neighbourhood"):
@@ -1169,6 +1385,7 @@ def main(argv=None):
 
     region_pbf = output_dir / f"{stem}.osm.pbf"
     final_pmtiles = output_dir / f"{stem}.pmtiles"
+    region_labels_path = output_dir / f"{stem}.region_labels.json"
 
     intermediates = []
 
@@ -1241,6 +1458,13 @@ def main(argv=None):
         print("\n=== Label manifest check ===")
         enforce_label_manifest(str(norm_paths["place"]))
 
+        # region_labels.json: client-side dynamic area-label sidecar (07
+        # resolution spec Chunk L9). Built from the same raw boundary export
+        # while it's still present, before intermediates are cleaned up.
+        print("\n=== region_labels.json (dynamic area-label sidecar) ===")
+        write_region_labels(str(raw_paths["boundary"]), args.bbox, str(region_labels_path))
+        enforce_region_labels_manifest(str(region_labels_path))
+
     generate_pmtiles(layer_files, str(final_pmtiles), bbox=args.bbox)
 
     if not args.keep_intermediates:
@@ -1259,8 +1483,9 @@ def main(argv=None):
         print("[INFO] keeping per-layer intermediates")
 
     print(f"\nDone:")
-    print(f"  region PBF: {region_pbf}")
-    print(f"  pmtiles:    {final_pmtiles}")
+    print(f"  region PBF:     {region_pbf}")
+    print(f"  pmtiles:        {final_pmtiles}")
+    print(f"  region labels:  {region_labels_path}")
 
 
 if __name__ == "__main__":
