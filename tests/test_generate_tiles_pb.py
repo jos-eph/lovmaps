@@ -209,10 +209,15 @@ class CountyLabels(unittest.TestCase):
         x, y = labels[0]["geometry"]["coordinates"]
         self.assertGreaterEqual(x, 8)
 
-    def test_open_linestring_geometry_still_yields_a_label(self):
-        # Simulates a county relation that didn't reassemble into a closed
-        # Polygon after the bbox extract (spec §2.2(2)) -- must not be
-        # silently dropped.
+    def test_linestring_geometry_no_longer_yields_a_label(self):
+        # 07 resolution spec Chunk L7: the LineString/MultiLineString rescue
+        # fallback is removed. It admitted rivers/roads whose OSM ways carry
+        # admin_level=6 because they happen to form part of a county line
+        # (spec §1 Cause 3 -- "Rocky Brook" etc. shipped as county labels).
+        # The one legitimate historical beneficiary (an unassembled Delaware
+        # County) is fixed upstream by `-S types=any` + the Feb 2026 OSM ring
+        # repair; EXPECTED_COUNTY_LABELS now catches any future regression
+        # loudly instead of silently rescuing it with a non-county label.
         path = _write_geojsonseq([
             _feature({"type": "LineString", "coordinates": [[1, 1], [2, 2], [3, 3]]},
                      admin_level="6", name="Clipped County"),
@@ -221,8 +226,63 @@ class CountyLabels(unittest.TestCase):
             labels = list(g.iter_county_labels(path))
         finally:
             os.remove(path)
-        self.assertEqual(len(labels), 1)
-        self.assertEqual(labels[0]["properties"]["name"], "Clipped County")
+        self.assertEqual(labels, [])
+
+    def test_junk_river_and_road_linestrings_are_excluded(self):
+        # Real junk observed in the shipped archive (07 spec §1 Cause 3): ways
+        # that form part of a county boundary but carry admin_level=6 in OSM
+        # without being a county at all. Must never become a class=county label.
+        path = _write_geojsonseq([
+            _feature({"type": "LineString", "coordinates": [[0, 0], [1, 1], [2, 0]]},
+                     admin_level="6", name="Rocky Brook"),
+            _feature({"type": "MultiLineString",
+                      "coordinates": [[[0, 0], [1, 1]], [[2, 2], [3, 3]]]},
+                     admin_level="6", name="Great Egg Harbor River"),
+        ])
+        try:
+            labels = list(g.iter_county_labels(path))
+        finally:
+            os.remove(path)
+        self.assertEqual(labels, [])
+
+    def test_polygon_and_multipolygon_still_accepted(self):
+        # Regression guard: only the LineString/MultiLineString branch is
+        # removed -- real counties (Polygon/MultiPolygon) are unaffected.
+        path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Real Polygon County"),
+            _feature({"type": "MultiPolygon", "coordinates": [[SQUARE], [SQUARE2]]},
+                     admin_level="6", name="Real MultiPolygon County"),
+        ])
+        try:
+            names = {lab["properties"]["name"] for lab in g.iter_county_labels(path)}
+        finally:
+            os.remove(path)
+        self.assertEqual(names, {"Real Polygon County", "Real MultiPolygon County"})
+
+    def test_all_manifest_counties_as_polygons_still_pass_the_manifest(self):
+        # Confirms removing the LineString fallback does not regress the
+        # 11-county manifest when every county exports as a proper (closed)
+        # Polygon -- the normal case post types=any + the OSM ring repair.
+        features = [
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name=name)
+            for name in g.EXPECTED_COUNTY_LABELS
+        ]
+        path = _write_geojsonseq(features)
+        try:
+            labels = list(g.iter_county_labels(path))
+        finally:
+            os.remove(path)
+        place_path = path + ".place"
+        with open(place_path, "w", encoding="utf-8") as f:
+            for lab in labels:
+                f.write("\x1e" + json.dumps(lab) + "\n")
+        try:
+            _, missing_counties = g.check_label_manifest(place_path)
+        finally:
+            os.remove(place_path)
+        self.assertEqual(missing_counties, [])
 
     def test_one_label_per_named_county(self):
         path = _write_geojsonseq([
@@ -270,6 +330,35 @@ class CountyLabels(unittest.TestCase):
 # Pennsylvania's centroid landing near Harrisburg, ~150km from the SEPTA bbox.
 STATE_LIKE = [[0, 0], [100, 0], [100, 100], [0, 100], [0, 0]]
 STATE_BBOX = (40, 40, 60, 60)
+
+
+class AppendCountyLabelsLogsNames(unittest.TestCase):
+    # 07 resolution spec Chunk L7: emitted label *names* are printed to the
+    # build log -- previously only a count was logged, so nobody could tell
+    # from CI output whether the "26 county labels" were real counties or the
+    # junk from Cause 3 (closes that gap).
+    def test_prints_emitted_county_names(self):
+        raw_path = _write_geojsonseq([
+            _feature({"type": "Polygon", "coordinates": [SQUARE]},
+                     admin_level="6", name="Bucks County"),
+            _feature({"type": "Polygon", "coordinates": [SQUARE2]},
+                     admin_level="6", name="Chester County"),
+        ])
+        place_path = raw_path + ".place"
+        with open(place_path, "w", encoding="utf-8"):
+            pass
+        import contextlib
+        import io
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                g.append_county_labels(raw_path, place_path)
+        finally:
+            os.remove(raw_path)
+            if os.path.exists(place_path):
+                os.remove(place_path)
+        self.assertIn("Bucks County", out.getvalue())
+        self.assertIn("Chester County", out.getvalue())
 
 
 class StateLabels(unittest.TestCase):

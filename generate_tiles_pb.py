@@ -595,11 +595,18 @@ def iter_county_labels(raw_boundary_path, bbox=None):
     has no fips), so the ladder never *requires* either — a data-poor county
     still labels, keyed by name.
 
-    Accepts Polygon/MultiPolygon *and* LineString/MultiLineString geometry (the
-    latter from a county whose relation didn't reassemble into a closed area
-    after the bbox extract) — every named county overlapping the bbox should
-    get a label, not just the ones that exported cleanly. If [bbox] is given,
-    the label is placed inside the county's bbox-visible portion.
+    Accepts Polygon/MultiPolygon geometry only. Earlier versions also accepted
+    a LineString/MultiLineString fallback (for a county relation that didn't
+    reassemble into a closed area after the bbox extract), but that fallback
+    also admitted rivers/roads whose OSM ways carry admin_level=6 because they
+    happen to form part of a county line (e.g. "Rocky Brook", "Great Egg
+    Harbor River", "Princeton Avenue" — see 07 resolution spec §1 Cause 3,
+    which found 8 such junk entries shipped as `class=county` labels). The one
+    legitimate historical beneficiary (an unassembled Delaware County) is
+    fixed upstream by `-S types=any` plus the Feb 2026 OSM ring repair; the
+    label manifest (EXPECTED_COUNTY_LABELS) now catches any future regression
+    loudly instead of silently rescuing it with a non-county label. If [bbox]
+    is given, the label is placed inside the county's bbox-visible portion.
     """
     best_by_key = {}  # wikidata|fips|name -> (size, name, geometry)
     with open(raw_boundary_path, "r", encoding="utf-8") as fin:
@@ -622,7 +629,7 @@ def iter_county_labels(raw_boundary_path, bbox=None):
             if not name:
                 continue
             geom = feat.get("geometry") or {}
-            if geom.get("type") not in ("Polygon", "MultiPolygon", "LineString", "MultiLineString"):
+            if geom.get("type") not in ("Polygon", "MultiPolygon"):
                 continue
             size = _geometry_size(geom)
             key = props.get("wikidata") or props.get("nist:fips_code") or name
@@ -651,11 +658,17 @@ def iter_county_labels(raw_boundary_path, bbox=None):
 def append_county_labels(raw_boundary_path, place_norm_path, bbox=None):
     """Append county label features (from the boundary export) to the place layer."""
     n = 0
+    names = []
     with open(place_norm_path, "a", encoding="utf-8") as fout:
         for feat in iter_county_labels(raw_boundary_path, bbox=bbox):
             fout.write("\x1e" + json.dumps(feat, separators=(",", ":")) + "\n")
             n += 1
+            names.append(feat["properties"]["name"])
     print(f"  appended {n} county labels -> {place_norm_path}")
+    # Names, not just a count -- so a run can be eyeballed for junk without a
+    # binary decode (07 resolution spec §1 Cause 3 found 8 river/road names
+    # hiding inside a bare "26 county labels" count).
+    print(f"  county label names: {', '.join(sorted(names)) if names else '(none)'}")
 
 
 # State name labels. States are admin_level 4 areas; we emit one label Point
