@@ -1125,11 +1125,33 @@ ZOOM_FILTERS = {
         # tileset's minzoom) for regional orientation -- 08 spec Chunk B1,
         # human override of the "drop all road classes below z13" default.
         ["in", "class", "motorway", "trunk", "primary"],
+        # Rail/transit stay. No BusNeighbor style draws them today, but this is
+        # a general-purpose tile source and they are the most plausible thing
+        # another consumer wants; they also cost only ~0.33 MB at z13 (0.9% of
+        # feature bytes). Keeping them was a deliberate call when the 08 spec
+        # gated the street classes -- see the test that pins this branch.
         ["all", [">=", "$zoom", 10], ["in", "class", "rail", "transit"]],
+        # `service` removed (C5): no BusNeighbor style selects it, here or in
+        # transportation_name, and it was 110,948 features / 8.31 MB = 23.6% of
+        # all z13 feature bytes -- decoded on the phone once per DISPLAYED tile
+        # and then discarded, because above z13 every display tile re-parses
+        # the whole z13 parent. See the BusNeighbor repo's
+        # CLAUDE_REFERENCE/tile_render_cost_chunked_spec.md, C5.
+        # The osmium extract in LAYERS still collects service ways, so
+        # re-admitting them is a one-line change here, not a re-download.
         ["all", [">=", "$zoom", 13],
-         ["in", "class", "secondary", "tertiary", "minor", "service"]],
+         ["in", "class", "secondary", "tertiary", "minor"]],
     ],
-    "transportation_name": [">=", "$zoom", 13],
+    # Was an unqualified zoom gate, which admitted the name of every class the
+    # transportation extract carries -- including 8,605 service-road names the
+    # geometry filter above already excludes. Mirror the class list so the two
+    # layers cannot drift apart. (C5)
+    "transportation_name": [
+        "all",
+        [">=", "$zoom", 13],
+        ["in", "class",
+         "motorway", "trunk", "primary", "secondary", "tertiary", "minor"],
+    ],
     "landcover": [
         "any",
         ["in", "class", "park", "wood"],

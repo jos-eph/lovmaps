@@ -588,9 +588,13 @@ class TransportationZoomFilterGatesStreetsToZoom13(unittest.TestCase):
             ["all", [">=", "$zoom", 10], ["in", "class", "rail", "transit"]],
             branches)
 
+    # The z13 gate is the contract; the exact expression is not. C5 added a
+    # class list beside the gate, so assert the behavior rather than the
+    # literal, or the next legitimate edit breaks this again.
     def test_transportation_name_gates_at_zoom_13(self):
-        self.assertEqual(g.ZOOM_FILTERS["transportation_name"],
-                         [">=", "$zoom", 13])
+        expression = g.ZOOM_FILTERS["transportation_name"]
+        self.assertTrue(evaluate_filter(expression, {"class": "primary"}, 13))
+        self.assertFalse(evaluate_filter(expression, {"class": "primary"}, 12))
 
 
 class GeneratePmtilesTileByteBudget(unittest.TestCase):
@@ -1323,6 +1327,148 @@ class RegionLabelsSizeBudget(unittest.TestCase):
         self.assertLess(simplified_points, raw_points,
                          "Douglas-Peucker did not reduce vertex count")
         self.assertLessEqual(size, 150_000, f"region_labels.json is {size} bytes")
+
+
+# ---------------------------------------------------------------------------
+# ZOOM_FILTERS: the -j payload handed to tippecanoe (C5 of the BusNeighbor
+# tile_render_cost_chunked_spec.md; C6 was considered and declined).
+#
+# These are pure assertions over the filter dict. They deliberately do NOT run
+# tippecanoe: a real tile build is billable CI minutes on a nonprofit's free
+# tier, and the thing worth testing here is the filter logic, which is data.
+#
+# The evaluator below implements only the operators ZOOM_FILTERS actually uses.
+# It is a test-local reimplementation of tippecanoe's -j semantics, so it
+# proves the filter says what we think it says -- not that tippecanoe agrees.
+# That second question is settled by a human smoke test on a real build, the
+# same split already used for the `$type` guard on the boundary layer.
+# ---------------------------------------------------------------------------
+
+def _filter_value(token, properties, zoom):
+    if token == "$zoom":
+        return zoom
+    if token == "$type":
+        return properties.get("$type")
+    return properties.get(token)
+
+
+def evaluate_filter(expression, properties, zoom):
+    """Evaluate a tippecanoe -j filter expression against one feature."""
+    op = expression[0]
+    if op == "any":
+        return any(evaluate_filter(e, properties, zoom) for e in expression[1:])
+    if op == "all":
+        return all(evaluate_filter(e, properties, zoom) for e in expression[1:])
+    if op == "in":
+        return _filter_value(expression[1], properties, zoom) in expression[2:]
+    if op == "==":
+        return _filter_value(expression[1], properties, zoom) == expression[2]
+    if op == ">=":
+        value = _filter_value(expression[1], properties, zoom)
+        return value is not None and value >= expression[2]
+    raise AssertionError(f"unsupported filter operator {op!r}")
+
+
+class ZoomFilterEvaluatorTest(unittest.TestCase):
+    """Guards the evaluator itself, so a bug in it cannot silently make the
+    filter assertions below vacuously pass."""
+
+    def test_operators(self):
+        self.assertTrue(evaluate_filter(["==", "class", "rail"], {"class": "rail"}, 10))
+        self.assertFalse(evaluate_filter(["==", "class", "rail"], {"class": "minor"}, 10))
+        self.assertTrue(evaluate_filter(["in", "class", "a", "b"], {"class": "b"}, 10))
+        self.assertFalse(evaluate_filter(["in", "class", "a", "b"], {"class": "c"}, 10))
+        self.assertTrue(evaluate_filter([">=", "$zoom", 13], {}, 13))
+        self.assertFalse(evaluate_filter([">=", "$zoom", 13], {}, 12))
+        self.assertTrue(evaluate_filter(
+            ["all", [">=", "$zoom", 13], ["==", "class", "minor"]],
+            {"class": "minor"}, 13))
+        self.assertFalse(evaluate_filter(
+            ["all", [">=", "$zoom", 13], ["==", "class", "minor"]],
+            {"class": "minor"}, 12))
+        self.assertTrue(evaluate_filter(
+            ["any", ["==", "class", "x"], ["==", "class", "y"]], {"class": "y"}, 0))
+        with self.assertRaises(AssertionError):
+            evaluate_filter(["!=", "class", "x"], {"class": "y"}, 0)
+
+
+class ZoomFiltersTest(unittest.TestCase):
+    """What each layer admits, class by class and zoom by zoom."""
+
+    def admits(self, layer, properties, zoom):
+        return evaluate_filter(g.ZOOM_FILTERS[layer], properties, zoom)
+
+    def road(self, klass, zoom, layer="transportation"):
+        return self.admits(layer, {"class": klass, "$type": "LineString"}, zoom)
+
+    # -- C5: class=service was 23.6% of z13 feature bytes and is selected by
+    # no BusNeighbor style, in either layer.
+    def test_service_roads_are_not_tiled(self):
+        for zoom in (10, 11, 12, 13):
+            self.assertFalse(self.road("service", zoom),
+                             f"transportation admitted service at z{zoom}")
+            self.assertFalse(self.road("service", zoom, "transportation_name"),
+                             f"transportation_name admitted service at z{zoom}")
+
+    # -- C6 was NOT taken for rail/transit: owner decision to keep them.
+    # No BusNeighbor style draws rail lines, but this is a general-purpose tile
+    # source and they cost ~0.33 MB at z13 (0.9% of feature bytes). The
+    # behavioral half of test_rail_transit_still_admitted_at_zoom_10 above,
+    # which pins the branch's shape.
+    def test_rail_and_transit_are_still_tiled(self):
+        for klass in ("rail", "transit"):
+            for zoom in (10, 11, 12, 13):
+                self.assertTrue(self.road(klass, zoom),
+                                f"transportation dropped {klass} at z{zoom}")
+            self.assertFalse(self.road(klass, 9),
+                             f"{klass} is z10+, so z9 must reject it")
+
+    # -- The other half of the contract: everything a style DOES select must
+    # survive. A filter that drops a needed class is not a saving, it is a
+    # missing road.
+    def test_styled_road_classes_survive(self):
+        for klass in ("motorway", "trunk", "primary"):
+            self.assertTrue(self.road(klass, 10),
+                            f"{klass} skeleton must reach z10 for orientation")
+        for klass in ("secondary", "tertiary", "minor"):
+            self.assertTrue(self.road(klass, 13), f"{klass} must reach z13")
+            self.assertFalse(self.road(klass, 12),
+                             f"{klass} is z13+, so z12 must reject it")
+
+    def test_styled_road_names_survive(self):
+        for klass in ("motorway", "trunk", "primary",
+                      "secondary", "tertiary", "minor"):
+            self.assertTrue(self.road(klass, 13, "transportation_name"),
+                            f"{klass} names must reach z13")
+            self.assertFalse(self.road(klass, 12, "transportation_name"),
+                             "transportation_name is z13-only")
+
+    # -- NOT changed by C6. The place layer still carries state and county
+    # label points, because generate_tiles_pb.py synthesizes them on purpose
+    # (iter_state_labels / iter_county_labels) and dropping the filter alone
+    # would leave that machinery running into a tippecanoe that discards its
+    # output. See the C6 note in the commit message.
+    def test_place_still_carries_synthesized_area_labels(self):
+        for klass in ("state", "county"):
+            self.assertTrue(self.admits("place", {"class": klass}, 6),
+                            f"place must still admit {klass} labels")
+
+    def test_place_still_carries_settlement_labels(self):
+        self.assertTrue(self.admits("place", {"class": "city"}, 4))
+        self.assertTrue(self.admits("place", {"class": "town"}, 6))
+        self.assertTrue(self.admits("place", {"class": "suburb"}, 10))
+        self.assertTrue(self.admits("place", {"class": "neighbourhood"}, 12))
+
+    # -- poi is untouched: every subclass it admits is drawn by a style.
+    def test_poi_transit_stops_survive(self):
+        self.assertTrue(self.admits("poi", {"subclass": "station"}, 11))
+        self.assertTrue(self.admits("poi", {"subclass": "bus_stop"}, 13))
+        self.assertFalse(self.admits("poi", {"subclass": "bus_stop"}, 12))
+
+    def test_filter_payload_is_json_serializable(self):
+        # tippecanoe receives this via json.dumps in generate_pmtiles; a
+        # non-serializable value would fail at build time, not here.
+        self.assertIsInstance(json.dumps(g.ZOOM_FILTERS), str)
 
 
 if __name__ == "__main__":
