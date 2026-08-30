@@ -54,9 +54,10 @@ env:
   TIPPECANOE_VERSION: '2.79.0'
   BASE_NAME: philly_commute_region
   # Must stay identical to generate_tiles_pb.py's DEFAULT_BBOX -- this is the
-  # value that actually governs releases (10 spec Appendix A: widened
-  # south/east; Maryland deliberately excluded, no MD source PBF above).
-  BBOX: '-76.00,39.30,-74.30,40.40'
+  # value that actually governs releases. North edge bounds the SEPTA service
+  # area (tip at Riegelsville, 40.60); Maryland deliberately excluded, no MD
+  # source PBF above.
+  BBOX: '-76.00,39.30,-74.30,40.65'
 
 jobs:
   release:
