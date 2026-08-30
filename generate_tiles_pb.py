@@ -73,7 +73,13 @@ print(f"Arguments sent to generate_tiles_pb, {sys.argv = }")
 SOURCE_PBF_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf"
 SOURCE_MD5_URL = "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf.md5"
 
-DEFAULT_BBOX = "-76.00,39.30,-74.30,40.40"  # SEPTA service region (10 spec Appendix A: widened south/east to include Salem/New Castle Co. and the truncated NJ counties -- Maryland deliberately excluded, no MD source PBF)
+# The region every release is built for. Must stay identical to BBOX in
+# .github/workflows/release-tiles.yml. The north edge bounds the SEPTA service
+# area, whose northern tip is Riegelsville at 40.60, so a consumer can treat
+# this bbox as covering that whole area. South and east cover Salem and New
+# Castle counties and the truncated NJ counties (10 spec Appendix A). Maryland
+# is deliberately excluded -- there is no MD source PBF.
+DEFAULT_BBOX = "-76.00,39.30,-74.30,40.65"
 DEFAULT_BASE_NAME = "philly_commute_region"
 
 # Attribution string embedded directly in the .pmtiles metadata so the OSM +

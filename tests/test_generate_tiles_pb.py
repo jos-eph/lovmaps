@@ -622,8 +622,8 @@ class DefaultBboxPin(unittest.TestCase):
     # BBOX env var must stay byte-identical (the workflow's value is the one
     # that actually governs releases) -- this pins the Python side so a
     # future edit to one without the other is caught in review, not in prod.
-    def test_widened_to_include_salem_and_new_castle_co(self):
-        self.assertEqual(g.DEFAULT_BBOX, "-76.00,39.30,-74.30,40.40")
+    def test_default_bbox_matches_release_workflow(self):
+        self.assertEqual(g.DEFAULT_BBOX, "-76.00,39.30,-74.30,40.65")
 
 
 class PadBbox(unittest.TestCase):
