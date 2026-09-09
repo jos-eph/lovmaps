@@ -77,8 +77,9 @@ SOURCE_MD5_URL = "https://download.geofabrik.de/north-america/us-northeast-lates
 # .github/workflows/release-tiles.yml. The north edge bounds the SEPTA service
 # area, whose northern tip is Riegelsville at 40.60, so a consumer can treat
 # this bbox as covering that whole area. South and east cover Salem and New
-# Castle counties and the truncated NJ counties (10 spec Appendix A). Maryland
-# is deliberately excluded -- there is no MD source PBF.
+# Castle counties and the truncated NJ counties (10 spec Appendix A), and the
+# southwest corner covers Cecil County MD. Every source PBF is clipped to this
+# one box, so a state is added by adding its extract, not by widening here.
 DEFAULT_BBOX = "-76.00,39.30,-74.30,40.65"
 DEFAULT_BASE_NAME = "philly_commute_region"
 
@@ -705,11 +706,12 @@ def append_county_labels(raw_boundary_path, place_norm_path, bbox=None):
 # per whitelisted state into the `place` layer (class == "state"). A state
 # polygon's full-area centroid is routinely far outside the bbox (Pennsylvania's
 # centroid is near Harrisburg, ~150km from the SEPTA bbox), so placement always
-# clips to the bbox first. Whitelisted to {PA, NJ, DE} per 02_LABELS spec §8 so
-# a sliver of an adjoining state (MD, NY) at the bbox edge doesn't also get a
-# label.
+# clips to the bbox first. Whitelisted per 02_LABELS spec §8 so a sliver of an
+# adjoining state (NY) at the bbox edge doesn't also get a label. Maryland is
+# on the list because Cecil County is real coverage, not bleed -- its extract
+# is a source PBF and the bbox's southwest corner is inside it.
 STATE_LABEL_TIPPECANOE = {"minzoom": 6}
-STATE_LABEL_WHITELIST = {"Pennsylvania", "New Jersey", "Delaware"}
+STATE_LABEL_WHITELIST = {"Pennsylvania", "New Jersey", "Delaware", "Maryland"}
 
 
 def iter_state_labels(raw_boundary_path, bbox):
@@ -788,10 +790,12 @@ def append_state_labels(raw_boundary_path, place_norm_path, bbox):
 # real export (no local pipeline run); Chunk B2's CI run is the first real
 # check. If either name is wrong, the manifest fails loudly and names the
 # gap -- see check_label_manifest / LOVMAPS_ALLOW_MISSING_LABELS below.
-# Maryland is deliberately NOT added here: DEFAULT_BBOX's southwest corner
-# overlaps Cecil County MD, but there is no Maryland source PBF (human
-# directive, 10 spec), so that corner is expected to render without a
-# label -- it is not manifest-required.
+# Cecil County MD is the county the Maryland source PBF was added for: it is
+# what DEFAULT_BBOX's southwest corner covers, and the whole point of that
+# extract is that the corner stops rendering blank. Required, so a silent loss
+# of it fails the build rather than quietly restoring the hole. Kent County MD
+# also clips in below the Sassafras, but only as a thin sliver, and the bare
+# name is ambiguous with Kent County DE -- left to superset semantics.
 EXPECTED_STATE_LABELS = frozenset(STATE_LABEL_WHITELIST)
 EXPECTED_COUNTY_LABELS = frozenset({
     # PA (in/overlapping DEFAULT_BBOX)
@@ -802,6 +806,8 @@ EXPECTED_COUNTY_LABELS = frozenset({
     "Mercer County", "Salem County", "Atlantic County", "Cumberland County",
     # DE
     "New Castle County",
+    # MD
+    "Cecil County",
 })
 
 

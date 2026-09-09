@@ -3,10 +3,10 @@ name: Release tiles
 # Dated GitHub Releases CI/CD pipeline for the Philadelphia commute-region
 # .pmtiles / .osm.pbf assets. See CLAUDE_REFERENCE/CI_CD_RELEASE_PLAN.md (§4.2)
 # for the full specification, and §3 (decisions D1, D3, D4, D5, D6, D7, D9).
-# Source PBFs: Pennsylvania + New Jersey + Delaware state extracts, merged
-# (SOURCE_PA_URL / SOURCE_NJ_URL / SOURCE_DE_URL below) — see SPECS/01_FIXES
-# for why this replaced the original single us-northeast extract (it omits
-# Delaware).
+# Source PBFs: Pennsylvania + New Jersey + Delaware + Maryland state extracts,
+# merged (SOURCE_PA_URL / SOURCE_NJ_URL / SOURCE_DE_URL / SOURCE_MD_URL below)
+# — see SPECS/01_FIXES for why this replaced the original single us-northeast
+# extract (it omits Delaware).
 #
 # Behaviour summary:
 #   * Scheduled daily run at 04:30 UTC (D5).
@@ -39,24 +39,30 @@ concurrency:
   cancel-in-progress: false   # never let a manual run clobber a scheduled run mid-flight
 
 env:
-  # Canonical upstream sources — Pennsylvania + New Jersey + Delaware state
-  # extracts (CI_CD_RELEASE_PLAN.md §1.1, updated per SPECS/01_FIXES). These
-  # are osmium-merged by generate_tiles_pb.py into one region PBF. Delaware
-  # is its own Geofabrik state extract (the old us-northeast source did not
-  # include it, leaving DE streets blank below the bbox's PA/DE border).
+  # Canonical upstream sources — Pennsylvania + New Jersey + Delaware +
+  # Maryland state extracts (CI_CD_RELEASE_PLAN.md §1.1, updated per
+  # SPECS/01_FIXES). These are osmium-merged by generate_tiles_pb.py into one
+  # region PBF. Delaware is its own Geofabrik state extract (the old
+  # us-northeast source did not include it, leaving DE streets blank below the
+  # bbox's PA/DE border). Maryland is the same story one border further west:
+  # BBOX's southwest corner covers Cecil County, so without it everything
+  # south of the Mason-Dixon line and west of the DE state line rendered as
+  # empty canvas.
   SOURCE_PA_URL: https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf
   SOURCE_PA_MD5_URL: https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf.md5
   SOURCE_NJ_URL: https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf
   SOURCE_NJ_MD5_URL: https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf.md5
   SOURCE_DE_URL: https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf
   SOURCE_DE_MD5_URL: https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf.md5
+  SOURCE_MD_URL: https://download.geofabrik.de/north-america/us/maryland-latest.osm.pbf
+  SOURCE_MD_MD5_URL: https://download.geofabrik.de/north-america/us/maryland-latest.osm.pbf.md5
   # Pinned tippecanoe source release used when the runner has no cached binary.
   TIPPECANOE_VERSION: '2.79.0'
   BASE_NAME: philly_commute_region
   # Must stay identical to generate_tiles_pb.py's DEFAULT_BBOX -- this is the
   # value that actually governs releases. North edge bounds the SEPTA service
-  # area (tip at Riegelsville, 40.60); Maryland deliberately excluded, no MD
-  # source PBF above.
+  # area (tip at Riegelsville, 40.60). Every source above is clipped to this
+  # one box, so adding a state widens coverage without widening the region.
   BBOX: '-76.00,39.30,-74.30,40.65'
 
 jobs:
@@ -161,10 +167,10 @@ jobs:
             exit 1
           fi
 
-      - name: Download source PBFs (PA, NJ, DE) with retry and md5 verification
+      - name: Download source PBFs (PA, NJ, DE, MD) with retry and md5 verification
         # Three attempts with exponential backoff (30s, 2m, 8m) per source.
         # Each PBF lands in ${RUNNER_TEMP} — ephemeral runner storage, never
-        # the workspace, never the git tree (plan §4.2 step 5). Three state
+        # the workspace, never the git tree (plan §4.2 step 5). Four state
         # extracts replace the old single us-northeast download (see env
         # block above for why).
         run: |
@@ -202,11 +208,12 @@ jobs:
           download_one PA "${SOURCE_PA_URL}" "${SOURCE_PA_MD5_URL}" "${RUNNER_TEMP}/pennsylvania-latest.osm.pbf"
           download_one NJ "${SOURCE_NJ_URL}" "${SOURCE_NJ_MD5_URL}" "${RUNNER_TEMP}/new-jersey-latest.osm.pbf"
           download_one DE "${SOURCE_DE_URL}" "${SOURCE_DE_MD5_URL}" "${RUNNER_TEMP}/delaware-latest.osm.pbf"
+          download_one MD "${SOURCE_MD_URL}" "${SOURCE_MD_MD5_URL}" "${RUNNER_TEMP}/maryland-latest.osm.pbf"
 
       - name: Generate pmtiles and region PBF
         # Passing --source-pbf (repeated) suppresses the script's built-in
         # download path so the workflow remains the sole owner of network
-        # I/O. generate_tiles_pb.py bbox-clips each of PA/NJ/DE and
+        # I/O. generate_tiles_pb.py bbox-clips each of PA/NJ/DE/MD and
         # osmium-merges the clips into the single region PBF.
         run: |
           set -euo pipefail
@@ -218,7 +225,8 @@ jobs:
             --bbox="${BBOX}" \
             --source-pbf "${RUNNER_TEMP}/pennsylvania-latest.osm.pbf" \
             --source-pbf "${RUNNER_TEMP}/new-jersey-latest.osm.pbf" \
-            --source-pbf "${RUNNER_TEMP}/delaware-latest.osm.pbf"
+            --source-pbf "${RUNNER_TEMP}/delaware-latest.osm.pbf" \
+            --source-pbf "${RUNNER_TEMP}/maryland-latest.osm.pbf"
 
       - name: Sanity-check outputs
         run: |
@@ -280,6 +288,8 @@ jobs:
             echo "source_nj_md5: ${SOURCE_NJ_MD5:-unknown}"
             echo "source_de_url: ${SOURCE_DE_URL}"
             echo "source_de_md5: ${SOURCE_DE_MD5:-unknown}"
+            echo "source_md_url: ${SOURCE_MD_URL}"
+            echo "source_md_md5: ${SOURCE_MD_MD5:-unknown}"
             echo "bbox: ${BBOX}"
             echo "pmtiles_sha256: ${PMTILES_SHA}"
             echo "osm_pbf_sha256: ${PBF_SHA}"
@@ -318,6 +328,7 @@ jobs:
             echo "- source PA: ${SOURCE_PA_URL} (md5 ${SOURCE_PA_MD5:-unknown})"
             echo "- source NJ: ${SOURCE_NJ_URL} (md5 ${SOURCE_NJ_MD5:-unknown})"
             echo "- source DE: ${SOURCE_DE_URL} (md5 ${SOURCE_DE_MD5:-unknown})"
+            echo "- source MD: ${SOURCE_MD_URL} (md5 ${SOURCE_MD_MD5:-unknown})"
             echo "- bbox: ${BBOX}"
             echo "- git SHA: ${GITHUB_SHA}"
             echo "- tippecanoe: ${TIPPECANOE_VERSION}"

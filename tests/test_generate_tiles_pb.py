@@ -380,9 +380,12 @@ class StateLabels(unittest.TestCase):
                          f"label {x, y} not inside bbox {STATE_BBOX}")
 
     def test_non_whitelisted_state_is_skipped(self):
+        # New York, not Maryland: MD joined the whitelist when its source PBF
+        # was added, and a fixture that outlives the behavior it pins is
+        # worse than no fixture. NY is the remaining real bleed risk.
         path = _write_geojsonseq([
             _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
-                     admin_level="4", name="Maryland"),
+                     admin_level="4", name="New York"),
         ])
         try:
             labels = list(g.iter_state_labels(path, STATE_BBOX))
@@ -401,17 +404,20 @@ class StateLabels(unittest.TestCase):
             os.remove(path)
         self.assertEqual(labels, [])
 
-    def test_all_three_whitelisted_states_can_be_emitted(self):
+    def test_every_whitelisted_state_can_be_emitted(self):
+        # Fixtures derive from the whitelist rather than repeating it, so
+        # adding a state (Maryland was the fourth) extends the coverage here
+        # instead of failing it.
         path = _write_geojsonseq([
-            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name="Pennsylvania"),
-            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name="New Jersey"),
-            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name="Delaware"),
+            _feature({"type": "Polygon", "coordinates": [STATE_LIKE]}, admin_level="4", name=name)
+            for name in sorted(g.STATE_LABEL_WHITELIST)
         ])
         try:
             names = {lab["properties"]["name"] for lab in g.iter_state_labels(path, STATE_BBOX)}
         finally:
             os.remove(path)
-        self.assertEqual(names, {"Pennsylvania", "New Jersey", "Delaware"})
+        self.assertEqual(names, set(g.STATE_LABEL_WHITELIST))
+        self.assertIn("Maryland", names)
 
     def test_append_state_labels_writes_class_state_features(self):
         raw_path = _write_geojsonseq([
@@ -783,14 +789,17 @@ class LabelManifestCheck(unittest.TestCase):
         # county whose silent loss started this saga.
         self.assertEqual(set(g.EXPECTED_STATE_LABELS), g.STATE_LABEL_WHITELIST)
         self.assertIn("Delaware County", g.EXPECTED_COUNTY_LABELS)
+        # Cecil County MD is the one the Maryland source PBF exists for --
+        # required, not tolerated, or the blank corner could come back green.
+        self.assertIn("Cecil County", g.EXPECTED_COUNTY_LABELS)
         # 11 pre-10-spec + Atlantic/Cumberland Co. NJ from Appendix A's bbox
-        # widening (10 spec Chunk B1).
-        self.assertGreaterEqual(len(g.EXPECTED_COUNTY_LABELS), 13)
+        # widening (10 spec Chunk B1) + Cecil Co. MD.
+        self.assertGreaterEqual(len(g.EXPECTED_COUNTY_LABELS), 14)
 
     def test_all_present_plus_bleed_extras_passes(self):
         path = _write_geojsonseq(
             self._complete_labels()
-            + [_label("county", "Cecil County"),      # MD sliver
+            + [_label("county", "Kent County"),       # MD/DE sliver
                _label("county", "Richmond County"),   # NY bleed
                _label("city", "Philadelphia")])       # other class ignored
         missing_states, missing_counties = g.check_label_manifest(path)
@@ -1069,7 +1078,7 @@ class IterRegionLabelFeatures(unittest.TestCase):
             _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
                      admin_level="4", name="Pennsylvania"),
             _feature({"type": "Polygon", "coordinates": [STATE_LIKE]},
-                     admin_level="4", name="Maryland"),  # not whitelisted
+                     admin_level="4", name="New York"),  # not whitelisted
             _feature({"type": "Polygon", "coordinates": [SQUARE]},
                      admin_level="6", name="Bucks County"),
         ])
@@ -1080,7 +1089,7 @@ class IterRegionLabelFeatures(unittest.TestCase):
         by_class = {(f["class"], f["name"]) for f in feats}
         self.assertIn(("state", "Pennsylvania"), by_class)
         self.assertIn(("county", "Bucks County"), by_class)
-        self.assertNotIn(("state", "Maryland"), by_class)
+        self.assertNotIn(("state", "New York"), by_class)
         for f in feats:
             self.assertTrue(f["rings"])
 
