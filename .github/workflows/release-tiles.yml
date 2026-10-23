@@ -20,6 +20,10 @@ name: Release tiles
 #   * Two-release pattern (D4): immutable `tiles-<DATE>` for pinning, rolling
 #     `current` for "always latest" consumers.
 #   * Dated releases beyond the most recent 30 are pruned (D6).
+#   * `current` also carries <BASE_NAME>_current.pointer.json, naming the dated
+#     release with the same bytes (write_current_pointer.py). Range-reading
+#     clients follow it to the immutable copy, so the daily overwrite of
+#     `current` can't change bytes under an open archive.
 
 on:
   schedule:
@@ -246,6 +250,19 @@ jobs:
             echo "::error::pmtiles is suspiciously small (< 100 KB); refusing to publish."
             exit 1
           fi
+          # The BusNeighbor app refuses an offline download larger than its
+          # kMaxDownloadBytes (busneighbor_oss lib/core/config/download_constants.dart,
+          # 50 MiB), the source of truth for this number. Publishing past it would
+          # break every offline download, so refuse; warn from 90%.
+          MAX_APP_DOWNLOAD_BYTES=52428800
+          WARN_APP_DOWNLOAD_BYTES=$((MAX_APP_DOWNLOAD_BYTES * 9 / 10))
+          if [ "${SIZE}" -gt "${MAX_APP_DOWNLOAD_BYTES}" ]; then
+            echo "::error::pmtiles is ${SIZE} bytes, over the app's ${MAX_APP_DOWNLOAD_BYTES}-byte download cap; refusing to publish."
+            exit 1
+          fi
+          if [ "${SIZE}" -gt "${WARN_APP_DOWNLOAD_BYTES}" ]; then
+            echo "::warning::pmtiles is ${SIZE} bytes, over 90% of the app's ${MAX_APP_DOWNLOAD_BYTES}-byte download cap."
+          fi
           # region_labels.json (07 resolution spec Chunk L9): its own manifest
           # check (enforce_region_labels_manifest) already failed the build if
           # a required state/county area is missing, so this is just a basic
@@ -298,6 +315,17 @@ jobs:
           } > "${RUN_TXT}"
           cat "${RUN_TXT}"
 
+      - name: Write 'current' pointer
+        # Not gated on publish, so a build-only smoke run shows the pointer too.
+        run: |
+          set -euo pipefail
+          python3 write_current_pointer.py \
+            --date "${DATE}" \
+            --base-name "${BASE_NAME}" \
+            --sha256 "$(awk '{print $1}' "./out/${BASE_NAME}_${DATE}.pmtiles.sha256")" \
+            --issued-at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --output "./out/${BASE_NAME}_current.pointer.json"
+
       - name: Stage 'current' assets (rename + re-sha256)
         if: steps.gate.outputs.publish == 'true'
         # The .sha256 sidecars must reference the renamed (`_current`) basenames
@@ -315,6 +343,8 @@ jobs:
           done
 
       - name: Create dated release and upload assets
+        # Must run before 'current' is updated: the pointer uploaded there names
+        # this release, and must never name one that doesn't exist yet.
         if: steps.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -378,6 +408,7 @@ jobs:
             "./out/current/${BASE_NAME}_current.osm.pbf.sha256"
             "./out/current/${BASE_NAME}_current.region_labels.json"
             "./out/current/${BASE_NAME}_current.region_labels.json.sha256"
+            "./out/${BASE_NAME}_current.pointer.json"
           )
           if [ -f ATTRIBUTION.txt ]; then
             ASSETS+=(ATTRIBUTION.txt)
