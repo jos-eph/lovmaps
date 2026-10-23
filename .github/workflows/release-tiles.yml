@@ -9,7 +9,7 @@ name: Release tiles
 # extract (it omits Delaware).
 #
 # Behaviour summary:
-#   * Scheduled daily run at 04:30 UTC (D5).
+#   * Scheduled daily, timed so the publish lands overnight Eastern (see `on`).
 #   * Manual run via workflow_dispatch; set push_release=false to build without
 #     uploading anything (smoke test).
 #   * Publishing is also gated by repo variable RELEASE_PIPELINE_ENABLED. It
@@ -27,7 +27,12 @@ name: Release tiles
 
 on:
   schedule:
-    - cron: '30 4 * * *'   # D5: 04:30 UTC, after Geofabrik daily refresh.
+    # 01:17 UTC. GitHub starts scheduled runs late here (~5 h, observed
+    # 4.2-7.8 h), so the publish lands around 2-4 AM Eastern, not in the
+    # morning commute. Off the hour, where the scheduler is less contended.
+    # A rare on-time run may build from the previous day's Geofabrik
+    # extract; the next run catches up.
+    - cron: '17 1 * * *'
   workflow_dispatch:
     inputs:
       push_release:
