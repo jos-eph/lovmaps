@@ -1,0 +1,21 @@
+# Keeps the SHA-pinned actions in .github/workflows current. Nothing here
+# merges on its own, and the release workflow doesn't run on pull requests:
+# smoke-test an update with a manual run (push_release=false) on its branch.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # Wait a week after an action's release before proposing it.
+    cooldown:
+      default-days: 7
+    # Minor and patch updates arrive as one PR; each major update gets its
+    # own, so a breaking one can be held back without blocking the rest.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
