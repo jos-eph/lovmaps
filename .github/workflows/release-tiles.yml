@@ -57,13 +57,13 @@ env:
   # BBOX's southwest corner covers Cecil County, so without it everything
   # south of the Mason-Dixon line and west of the DE state line rendered as
   # empty canvas.
-  SOURCE_PA_URL: https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf
+  SOURCE_PA_URL: https://download.geofabrik.de/us/pennsylvania/pennsylvania-latest.osm.pbf
   SOURCE_PA_MD5_URL: https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf.md5
-  SOURCE_NJ_URL: https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf
+  SOURCE_NJ_URL: https://download.geofabrik.de/us/new-jersey/new-jersey-latest.osm.pbf
   SOURCE_NJ_MD5_URL: https://download.geofabrik.de/north-america/us/new-jersey-latest.osm.pbf.md5
-  SOURCE_DE_URL: https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf
+  SOURCE_DE_URL: https://download.geofabrik.de/us/delaware/delaware-latest.osm.pbf
   SOURCE_DE_MD5_URL: https://download.geofabrik.de/north-america/us/delaware-latest.osm.pbf.md5
-  SOURCE_MD_URL: https://download.geofabrik.de/north-america/us/maryland-latest.osm.pbf
+  SOURCE_MD_URL: https://download.geofabrik.de/us/maryland/maryland-latest.osm.pbf
   SOURCE_MD_MD5_URL: https://download.geofabrik.de/north-america/us/maryland-latest.osm.pbf.md5
   # Pinned tippecanoe source release used when the runner has no cached binary.
   TIPPECANOE_VERSION: '2.79.0'
@@ -186,12 +186,15 @@ jobs:
           set -euo pipefail
           download_one() {
             local name="$1" url="$2" md5_url="$3" dest="$4"
+            local md5_fallback_url="${url}.md5"
             local attempts=3 delay=30
             for i in $(seq 1 "${attempts}"); do
               echo "Source PBF download attempt ${i}/${attempts} (${name})"
               rm -f "${dest}" "${dest}.part" "${dest}.md5"
               if curl -fsSL -o "${dest}.part" "${url}" \
-                 && curl -fsSL -o "${dest}.md5" "${md5_url}"; then
+                 && (curl -fsSL -o "${dest}.md5" "${md5_url}" \
+                     || { echo "::warning::Primary MD5 fetch failed for ${name}; trying fallback ${md5_fallback_url}"; \
+                          curl -fsSL -o "${dest}.md5" "${md5_fallback_url}"; }); then
                 mv "${dest}.part" "${dest}"
                 expected="$(awk '{print tolower($1)}' "${dest}.md5")"
                 actual="$(md5sum "${dest}" | awk '{print tolower($1)}')"
