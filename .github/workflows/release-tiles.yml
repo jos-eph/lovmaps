@@ -182,16 +182,31 @@ jobs:
         # the workspace, never the git tree (plan §4.2 step 5). Four state
         # extracts replace the old single us-northeast download (see env
         # block above for why).
+        # Geofabrik redirects *-latest.osm.pbf to a dated file. Its dated
+        # .md5 sidecar is checked first: it matches the exact bytes received,
+        # and it exists even when *-latest.osm.pbf.md5 is briefly missing
+        # (404 on 2026-11-23). The configured *_MD5_URL is the fallback.
         run: |
           set -euo pipefail
+          fetch_md5() {
+            local name="$1" url="$2" effective="$3" md5_url="$4" out="$5"
+            if [ "${effective}" != "${url}" ] && [[ "${effective}" == *.osm.pbf ]]; then
+              if curl -fsSL -o "${out}" "${effective}.md5"; then
+                return 0
+              fi
+              echo "::warning::Dated MD5 fetch failed for ${name}; trying ${md5_url}"
+            fi
+            curl -fsSL -o "${out}" "${md5_url}"
+          }
           download_one() {
             local name="$1" url="$2" md5_url="$3" dest="$4"
-            local attempts=3 delay=30
+            local attempts=3 delay=30 effective
             for i in $(seq 1 "${attempts}"); do
               echo "Source PBF download attempt ${i}/${attempts} (${name})"
               rm -f "${dest}" "${dest}.part" "${dest}.md5"
-              if curl -fsSL -o "${dest}.part" "${url}" \
-                 && curl -fsSL -o "${dest}.md5" "${md5_url}"; then
+              if effective="$(curl -fsSL -w '%{url_effective}' -o "${dest}.part" "${url}")" \
+                 && echo "Resolved ${name}: ${effective}" \
+                 && fetch_md5 "${name}" "${url}" "${effective}" "${md5_url}" "${dest}.md5"; then
                 mv "${dest}.part" "${dest}"
                 expected="$(awk '{print tolower($1)}' "${dest}.md5")"
                 actual="$(md5sum "${dest}" | awk '{print tolower($1)}')"
